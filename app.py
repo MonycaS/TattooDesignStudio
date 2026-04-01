@@ -122,12 +122,24 @@ with gr.Blocks(title="TattooDesigner") as demo:
     gr.Markdown(
         """
         # TattooDesigner 🖋️
+
         Upload a photo of the body area (hand/arm/leg/neck etc.), choose tattoo type, then generate the design.
 
         **Backend:** Pollinations.ai (no API token required)
-        
+
         **Fixed style automatically added:**
         `tattoo design, white background, fine line art, professional tattoo flash, 8k, symmetrical, centered, isolated on white`
+
+        **Usage & Licensing**
+
+        This app uses the Pollinations.AI image API (models such as "flux" / "turbo") as the backend generator.  
+        You own the designs you generate with this app, but you are responsible for ensuring that your use complies with:
+        - Pollinations.AI Terms and API documentation  
+        - The specific license of each underlying model (some models allow commercial use, some do not)
+
+        For more details, see:
+        - https://pollinations.ai/terms  
+        - https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md
         """
     )
 
