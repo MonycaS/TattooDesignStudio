@@ -3,7 +3,6 @@ os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import requests
 from io import BytesIO
-import time
 from PIL import Image
 import gradio as gr
 
@@ -30,8 +29,6 @@ MODEL_ENDPOINTS = {
     "Flux": "flux",
     "Turbo": "turbo",
 }
-MAX_RETRIES = 3
-REQUEST_TIMEOUT_SECONDS = 120
 
 TATTOO_STYLE_PROMPT = (
     "tattoo design, white background, fine line art, professional tattoo flash, "
@@ -81,61 +78,17 @@ def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
         "seed": seed,
         "nologo": "true",
     }
-    request_url = f"{POLLINATIONS_BASE_URL}/{requests.utils.quote(full_prompt, safe='')}"
-    last_error = None
-    for attempt in range(MAX_RETRIES + 1):
-        try:
-            resp = requests.get(
-                request_url,
-                params=params,
-                timeout=REQUEST_TIMEOUT_SECONDS,
-            )
-        except (requests.exceptions.ReadTimeout, requests.exceptions.ConnectionError) as e:
-            if attempt < MAX_RETRIES:
-                wait_seconds = 2 ** attempt
-                print(
-                    f"[TattooDesigner] Network timeout/connection error. "
-                    f"Retry {attempt + 1}/{MAX_RETRIES} in {wait_seconds}s..."
-                )
-                time.sleep(wait_seconds)
-                continue
-            last_error = (
-                "Connection timeout to Pollinations (port 443). "
-                "Please check internet/VPN/firewall and try again."
-            )
-            print(f"[TattooDesigner] request error: {e}")
-            break
-
-        if resp.status_code == 200:
-            content_type = resp.headers.get("Content-Type", "")
-            if "image" not in content_type.lower():
-                raise RuntimeError(f"Pollinations returned non-image response: {content_type}")
-            return Image.open(BytesIO(resp.content)).convert("RGB")
-
-        # 429 = provider rate limit; respect Retry-After when available.
-        if resp.status_code == 429:
-            retry_after = resp.headers.get("Retry-After")
-            if attempt < MAX_RETRIES:
-                try:
-                    wait_seconds = max(1, int(retry_after)) if retry_after else (2 ** attempt)
-                except ValueError:
-                    wait_seconds = 2 ** attempt
-                print(
-                    f"[TattooDesigner] Pollinations rate-limited (429). "
-                    f"Retry {attempt + 1}/{MAX_RETRIES} in {wait_seconds}s..."
-                )
-                time.sleep(wait_seconds)
-                continue
-            last_error = (
-                "Pollinations rate limit reached (HTTP 429). "
-                "Please wait 30-60 seconds and try again."
-            )
-            break
-
-        last_error = f"Pollinations error {resp.status_code}: {resp.text[:500]}"
-        break
-
-    raise RuntimeError(last_error or "Unknown error while calling Pollinations.")
+    resp = requests.get(
+        f"{POLLINATIONS_BASE_URL}/{requests.utils.quote(full_prompt, safe='')}",
+        params=params,
+        timeout=90,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(f"Pollinations error {resp.status_code}: {resp.text[:500]}")
+    content_type = resp.headers.get("Content-Type", "")
+    if "image" not in content_type.lower():
+        raise RuntimeError(f"Pollinations returned non-image response: {content_type}")
+    return Image.open(BytesIO(resp.content)).convert("RGB")
 
 
 def generate_tattoo(
