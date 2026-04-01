@@ -179,3 +179,23 @@ with gr.Blocks(title="TattooDesigner") as demo:
 if __name__ == "__main__":
     print("TattooDesigner starting...")
     demo.launch(debug=True)
+
+
+
+
+
+
+
+
+
+
+
+
+    
+
+
+
+
+
+
+
