@@ -102,7 +102,7 @@ def generate_tattoo(
     if not prompt or not prompt.strip():
         return None
 
-    # Endpointul folosit este text-to-image; poza este păstrată doar ca referință
+    # Endpoint text-to-image; poza este păstrată doar ca referință
     # pentru prompt (pentru un img2img ulterior o putem integra).
     _ = body_photo_path
     enhanced_prompt = (
@@ -189,8 +189,10 @@ with gr.Blocks(title="TattooDesigner") as demo:
     )
 
 if __name__ == "__main__":
-    print("TattooDesigner starting...")
-    demo.launch(debug=True)
+    import os
+    port = int(os.getenv("PORT", 7860))
+    print("TattooDesigner starting on port", port)
+    demo.launch(server_name="0.0.0.0", server_port=port)
 
 
 
