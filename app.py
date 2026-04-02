@@ -3,7 +3,7 @@ os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import requests
 from io import BytesIO
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import gradio as gr
 
 # --- PATCH pentru bug-ul gradio_client (schema bool) ---
@@ -60,6 +60,35 @@ TATTOO_TYPES = [
     "realism",
 ]
 
+# ==============================
+# Licențe & watermark
+# ==============================
+
+# DOAR PENTRU TEST. Mai târziu vei pune aici cheile reale de la Gumroad
+VALID_KEYS = {
+    "ABC-123",
+    "DEF-456",
+}
+
+
+def add_watermark(img: Image.Image) -> Image.Image:
+    """Adaugă un watermark simplu pentru varianta Free."""
+    img = img.copy()
+    draw = ImageDraw.Draw(img)
+    text = "TattooDesigner"
+    font = ImageFont.load_default()
+    text_w, text_h = draw.textsize(text, font=font)
+    w, h = img.size
+    x = w - text_w - 10
+    y = h - text_h - 10
+    # watermark simplu, negru
+    draw.text((x, y), text, font=font, fill=(0, 0, 0))
+    return img
+
+
+# ==============================
+# Pollinations call
+# ==============================
 
 def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
     full_prompt = (
@@ -91,6 +120,10 @@ def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
     return Image.open(BytesIO(resp.content)).convert("RGB")
 
 
+# ==============================
+# Generate tattoo (Free vs Pro)
+# ==============================
+
 def generate_tattoo(
     prompt: str,
     body_photo_path: str,
@@ -98,12 +131,19 @@ def generate_tattoo(
     tattoo_type: str,
     model_label: str,
     aspect_label: str,
+    license_key: str,
 ):
     if not prompt or not prompt.strip():
         return None
 
-    # Endpoint text-to-image; poza este păstrată doar ca referință
-    # pentru prompt (pentru un img2img ulterior o putem integra).
+    # verificare simplă de PRO (mai târziu vei înlocui cu chei reale de la Gumroad)
+    is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
+
+    # pentru Free, forțăm un aspect mai mic (de ex. Square)
+    if not is_pro:
+        aspect_label = "Square 1:1"
+
+    # Endpoint text-to-image; poza este păstrată doar ca referință în prompt
     _ = body_photo_path
     enhanced_prompt = (
         f"{prompt.strip()}, {tattoo_type} tattoo, placement on {body_area}, "
@@ -111,12 +151,24 @@ def generate_tattoo(
     )
 
     try:
-        return call_sdxl_text2img(enhanced_prompt, aspect_label, model_label)
+        img = call_sdxl_text2img(enhanced_prompt, aspect_label, model_label)
+
+        if not is_pro:
+            # Free: micșorăm și punem watermark
+            img = img.resize((512, 512))
+            img = add_watermark(img)
+
+        return img
+
     except Exception as e:
         err = str(e)
         print(f"[TattooDesigner] generate_tattoo error: {err}")
         raise gr.Error(f"Generation failed: {err}")
 
+
+# ==============================
+# UI Gradio
+# ==============================
 
 with gr.Blocks(title="TattooDesigner") as demo:
     gr.Markdown(
@@ -126,6 +178,10 @@ with gr.Blocks(title="TattooDesigner") as demo:
         Upload a photo of the body area (hand/arm/leg/neck etc.), choose tattoo type, then generate the design.
 
         **Backend:** Pollinations.ai (no API token required)
+
+        **Free vs PRO**
+        - Free: lower resolution + watermark
+        - PRO: full resolution, no watermark, using a license key from Gumroad
 
         **Fixed style automatically added:**
         `tattoo design, white background, fine line art, professional tattoo flash, 8k, symmetrical, centered, isolated on white`
@@ -138,8 +194,8 @@ with gr.Blocks(title="TattooDesigner") as demo:
         - The specific license of each underlying model (some models allow commercial use, some do not)
 
         For more details, see:
-        - https://pollinations.ai/terms  
-        - https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md
+        - [https://pollinations.ai/terms](https://pollinations.ai/terms)  
+        - [https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md](https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md)
         """
     )
 
@@ -170,9 +226,13 @@ with gr.Blocks(title="TattooDesigner") as demo:
                 value=list(MODEL_ENDPOINTS.keys())[0],
             )
             aspect = gr.Dropdown(
-                label="Aspect Ratio",
+                label="Aspect Ratio (for PRO users; Free uses Square 1:1)",
                 choices=list(ASPECT_RATIOS.keys()),
                 value="Vertical 2:3 (arm)",
+            )
+            license_key = gr.Textbox(
+                label="License key (if you bought PRO on Gumroad)",
+                placeholder="Paste your Gumroad license key here",
             )
             btn = gr.Button("Generate tattoo")
 
@@ -184,12 +244,11 @@ with gr.Blocks(title="TattooDesigner") as demo:
 
     btn.click(
         fn=generate_tattoo,
-        inputs=[user_prompt, body_photo, body_area, tattoo_type, model_choice, aspect],
+        inputs=[user_prompt, body_photo, body_area, tattoo_type, model_choice, aspect, license_key],
         outputs=output_image,
     )
 
 if __name__ == "__main__":
-    import os
     port = int(os.getenv("PORT", 7860))
     print("TattooDesigner starting on port", port)
     demo.launch(server_name="0.0.0.0", server_port=port)
