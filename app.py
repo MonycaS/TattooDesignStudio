@@ -1,12 +1,13 @@
-import os
+    import os
+# Dezactivăm analiticele pentru a evita erori de conexiune inutile pe server
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import requests
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFont
 import gradio as gr
 
-# --- PATCH pentru bug-ul gradio_client ---
+# --- PATCH pentru bug-ul gradio_client (esențial pentru stabilitate) ---
 import gradio_client.utils as gc_utils
 _original__json_schema_to_python_type = gc_utils._json_schema_to_python_type
 def _patched__json_schema_to_python_type(schema, defs=None):
@@ -16,15 +17,19 @@ def _patched__json_schema_to_python_type(schema, defs=None):
 gc_utils._json_schema_to_python_type = _patched__json_schema_to_python_type
 
 # ==============================
-# Configurații
+# Configurații API & Stil
 # ==============================
 POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt"
 MODEL_ENDPOINTS = {"Flux": "flux", "Turbo": "turbo"}
 TATTOO_STYLE_PROMPT = "tattoo design, white background, fine line art, professional tattoo flash, 8k, symmetrical, centered, isolated on white"
-ASPECT_RATIOS = {"Square 1:1": (1024, 1024), "Vertical 2:3": (768, 1152)}
+ASPECT_RATIOS = {"Square 1:1": (1024, 1024), "Vertical 2:3 (arm)": (768, 1152)}
 BODY_AREAS = ["hand", "arm", "leg", "neck", "chest", "back"]
 TATTOO_TYPES = ["minimalist", "fine line", "traditional", "tribal", "geometric", "realism"]
 VALID_KEYS = {"ABC-123", "6F0E4C97-B72A4E69-A11BF6C4-AF6517E7"}
+
+# ==============================
+# Funcții Procesare Imagine
+# ==============================
 
 def add_watermark(img: Image.Image) -> Image.Image:
     img = img.copy()
@@ -36,12 +41,45 @@ def add_watermark(img: Image.Image) -> Image.Image:
     draw.text((w - (bbox[2]-bbox[0]) - 10, h - (bbox[3]-bbox[1]) - 10), text, font=font, fill=(128, 128, 128))
     return img
 
+def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
+    """Suprapune tatuajul pe poza cu mâna eliminând fundalul alb."""
+    bg = Image.open(background_path).convert("RGBA")
+    bg_w, bg_h = bg.size
+
+    # Convertim tatuajul și scoatem albul (transparență)
+    tattoo_rgba = tattoo_img.convert("RGBA")
+    data = tattoo_rgba.getdata()
+    new_data = []
+    for item in data:
+        # Dacă pixelul e alb, îl facem transparent
+        if item[0] > 215 and item[1] > 215 and item[2] > 215:
+            new_data.append((255, 255, 255, 0))
+        else:
+            # Opacitate 210 pentru a lăsa textura pielii să se vadă puțin (realism)
+            new_data.append((item[0], item[1], item[2], 210))
+    tattoo_rgba.putdata(new_data)
+
+    # Redimensionare proporțională
+    t_w = int(bg_w * (scale / 100))
+    w_percent = (t_w / float(tattoo_rgba.size[0]))
+    t_h = int((float(tattoo_rgba.size[1]) * float(w_percent)))
+    tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
+
+    # Poziționare procentuală
+    actual_x = int(bg_w * (x_pos / 100)) - (t_w // 2)
+    actual_y = int(bg_h * (y_pos / 100)) - (t_h // 2)
+
+    # Suprapunere finală
+    canvas = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+    canvas.paste(tattoo_rgba, (actual_x, actual_y))
+    combined = Image.alpha_composite(bg, canvas)
+    return combined.convert("RGB")
+
 def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
     full_prompt = f"{user_prompt}, {TATTOO_STYLE_PROMPT}"
     width, height = ASPECT_RATIOS.get(aspect_label, (1024, 1024))
     model_id = MODEL_ENDPOINTS.get(model_label, "flux")
-    seed = int.from_bytes(os.urandom(2), "big")
-    params = {"width": width, "height": height, "model": model_id, "seed": seed, "nologo": "true"}
+    params = {"width": width, "height": height, "model": model_id, "seed": int.from_bytes(os.urandom(2), "big"), "nologo": "true"}
     
     resp = requests.get(f"{POLLINATIONS_BASE_URL}/{requests.utils.quote(full_prompt)}", params=params, timeout=90)
     if resp.status_code != 200:
@@ -49,61 +87,25 @@ def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
     return Image.open(BytesIO(resp.content)).convert("RGB")
 
 # ==============================
-# Funcția de Procesare (LOGICA NOUĂ)
+# Logica Principală Gradio
 # ==============================
-def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
-    # 1. Deschide poza cu mâna
-    bg = Image.open(background_path).convert("RGBA")
-    bg_w, bg_h = bg.size
-
-    # 2. Transformă fundalul alb al tatuajului în transparență
-    tattoo_rgba = tattoo_img.convert("RGBA")
-    data = tattoo_rgba.getdata()
-    new_data = []
-    for item in data:
-        # Dacă pixelul este aproape alb (peste 220), îl facem transparent
-        if item[0] > 220 and item[1] > 220 and item[2] > 220:
-            new_data.append((255, 255, 255, 0))
-        else:
-            # Păstrăm desenul cu o ușoară transparență pentru realism (opacitate 210 din 255)
-            new_data.append((item[0], item[1], item[2], 210))
-    tattoo_rgba.putdata(new_data)
-
-    # 3. Redimensionare bazată pe slider-ul 'scale'
-    t_w = int(bg_w * (scale / 100))
-    w_percent = (t_w / float(tattoo_rgba.size[0]))
-    t_h = int((float(tattoo_rgba.size[1]) * float(w_percent)))
-    tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
-
-    # 4. Calcul poziție (procentual din mărimea pozei de fundal)
-    actual_x = int(bg_w * (x_pos / 100)) - (t_w // 2)
-    actual_y = int(bg_h * (y_pos / 100)) - (t_h // 2)
-
-    # 5. Suprapunere (Paste) folosind masca de transparență
-    canvas = Image.new("RGBA", bg.size, (0, 0, 0, 0))
-    canvas.paste(tattoo_rgba, (actual_x, actual_y))
-    combined = Image.alpha_composite(bg, canvas)
-    
-    return combined.convert("RGB")
 
 def generate_tattoo(prompt, body_photo_path, body_area, tattoo_type, model_label, aspect_label, license_key, x_pos, y_pos, scale):
     if not prompt: return None
     is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
     
-    enhanced_prompt = f"{prompt.strip()}, {tattoo_type} tattoo, stencil art, black ink on white background"
+    enhanced_prompt = f"{prompt.strip()}, {tattoo_type} tattoo, stencil, black ink, white background"
     
     try:
-        # Generăm tatuajul
         tattoo_design = call_sdxl_text2img(enhanced_prompt, aspect_label, model_label)
         
-        # Dacă avem poza cu mâna, le suprapunem
         if body_photo_path:
             final_img = apply_tattoo_to_skin(body_photo_path, tattoo_design, x_pos, y_pos, scale)
         else:
             final_img = tattoo_design
 
         if not is_pro:
-            final_img = final_img.resize((600, 600))
+            final_img = final_img.resize((700, 700))
             final_img = add_watermark(final_img)
             
         return final_img
@@ -111,33 +113,33 @@ def generate_tattoo(prompt, body_photo_path, body_area, tattoo_type, model_label
         raise gr.Error(f"Eroare: {str(e)}")
 
 # ==============================
-# UI Gradio
+# Interfața (UI)
 # ==============================
 with gr.Blocks(title="TattooDesigner PRO") as demo:
-    gr.Markdown("# TattooDesigner 🖋️\nAcum poți previzualiza tatuajul direct pe piele!")
+    gr.Markdown("# TattooDesigner 🖋️\nÎncarcă poza cu zona corpului și generează design-ul!")
     
     with gr.Row():
         with gr.Column():
-            user_prompt = gr.Textbox(label="Descriere Tatuaj", placeholder="Ex: a small minimalist wolf")
-            body_photo = gr.Image(label="Încarcă poza cu mâna/zona corpului", type="filepath")
+            user_prompt = gr.Textbox(label="Descriere (Engleză)", placeholder="Ex: minimalist geometric forest")
+            body_photo = gr.Image(label="Poza cu mâna/brațul", type="filepath")
             
             with gr.Group():
-                gr.Markdown("### Ajustare Poziție Tatuaj")
-                x_pos = gr.Slider(0, 100, value=50, label="Poziție Orizontală (%)")
-                y_pos = gr.Slider(0, 100, value=50, label="Poziție Verticală (%)")
-                scale = gr.Slider(5, 100, value=30, label="Dimensiune Tatuaj (%)")
+                gr.Markdown("### Control Poziție Tatuaj")
+                x_pos = gr.Slider(0, 100, value=50, label="Orizontal (%)")
+                y_pos = gr.Slider(0, 100, value=50, label="Vertical (%)")
+                scale = gr.Slider(5, 100, value=30, label="Dimensiune (%)")
             
-            with gr.Accordion("Setări Avansate", open=False):
-                body_area = gr.Dropdown(choices=BODY_AREAS, value="arm", label="Zonă Corp")
+            with gr.Accordion("Opțiuni Avansate", open=False):
+                body_area = gr.Dropdown(choices=BODY_AREAS, value="arm", label="Zonă")
                 tattoo_type = gr.Dropdown(choices=TATTOO_TYPES, value="fine line", label="Stil")
-                model_choice = gr.Dropdown(choices=list(MODEL_ENDPOINTS.keys()), value="Flux", label="Model AI")
+                model_choice = gr.Dropdown(choices=list(MODEL_ENDPOINTS.keys()), value="Flux", label="Model")
                 aspect = gr.Dropdown(choices=list(ASPECT_RATIOS.keys()), value="Square 1:1", label="Aspect")
             
-            license_key = gr.Textbox(label="Licență PRO (Gumroad)", type="password")
-            btn = gr.Button("Generează și Aplică", variant="primary")
+            license_key = gr.Textbox(label="Licență PRO", type="password")
+            btn = gr.Button("Generează Tatuaj", variant="primary")
 
         with gr.Column():
-            output_image = gr.Image(label="Rezultat Final", type="pil")
+            output_image = gr.Image(label="Previzualizare", type="pil")
 
     btn.click(
         fn=generate_tattoo,
@@ -145,31 +147,19 @@ with gr.Blocks(title="TattooDesigner PRO") as demo:
         outputs=output_image
     )
 
-
+# ==============================
+# Lansare (Configurat pentru Render)
+# ==============================
 if __name__ == "__main__":
-    # Render furnizează automat portul prin variabila de mediu PORT
+    # Luăm portul de la Render sau folosim 7860 local
     port = int(os.environ.get("PORT", 7860))
+    print(f"Lansare aplicație pe portul {port}...")
     
-    print(f"TattooDesigner porneste pe portul {port}...")
-    
-    # server_name="0.0.0.0" este CRUCIAL pentru Render
+    # server_name="0.0.0.0" permite accesul extern (Render)
     demo.launch(
         server_name="0.0.0.0", 
-        server_port=port,
-        share=False  # Nu avem nevoie de link-ul public gradio.live pe Render
-    )
-
-
-
-
-
-
-
-
-
-
-
-    
+        server_port=port
+    )    
 
 
 
