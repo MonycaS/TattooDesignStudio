@@ -218,8 +218,7 @@ if __name__ == "__main__":
     # Fixed for Render/Cloud deployment (0.0.0.0 binding)
     port = int(os.environ.get("PORT", 7860))
     print(f"TattooDesigner starting on port {port}")
-    demo.launch(server_name="0.0.0.0", server_port=port)import os
-os.environ["GRADIO_ANALYTICS_ENABLED"] = "False
+    demo.launch(server_name="0.0.0.0", server_port=port)
     
 
 
