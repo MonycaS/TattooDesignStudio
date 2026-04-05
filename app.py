@@ -145,9 +145,19 @@ with gr.Blocks(title="TattooDesigner PRO") as demo:
         outputs=output_image
     )
 
-if __name__ == "__main__":
-    demo.launch()
 
+if __name__ == "__main__":
+    # Render furnizează automat portul prin variabila de mediu PORT
+    port = int(os.environ.get("PORT", 7860))
+    
+    print(f"TattooDesigner porneste pe portul {port}...")
+    
+    # server_name="0.0.0.0" este CRUCIAL pentru Render
+    demo.launch(
+        server_name="0.0.0.0", 
+        server_port=port,
+        share=False  # Nu avem nevoie de link-ul public gradio.live pe Render
+    )
 
 
 
