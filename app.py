@@ -60,11 +60,12 @@ TATTOO_TYPES = [
     "realism",
 ]
 
+
 # ==============================
 # Licențe & watermark
 # ==============================
 
-# DOAR PENTRU TEST. Mai târziu vei pune aici cheile reale de la Gumroad
+# DOAR PENTRU TEST.
 VALID_KEYS = {
     "ABC-123",
     "DEF-456",
@@ -239,6 +240,16 @@ with gr.Blocks(title="TattooDesigner") as demo:
                 label="License key (if you bought PRO on Gumroad)",
                 placeholder="Paste your Gumroad license key here",
             )
+
+            gr.Markdown(
+                """
+                ### PRO access
+
+                Don’t have a license yet?  
+                👉 [Get TattooDesigner PRO on Gumroad](https://inkforge0.gumroad.com/l/tattoodesigner-pro)
+                """
+            )
+
             btn = gr.Button("Generate tattoo")
 
         with gr.Column():
