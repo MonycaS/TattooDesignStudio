@@ -1,4 +1,4 @@
-    import os
+import os
 # Dezactivăm analiticele pentru a evita erori de conexiune inutile pe server
 os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
@@ -159,7 +159,7 @@ if __name__ == "__main__":
     demo.launch(
         server_name="0.0.0.0", 
         server_port=port
-    )    
+    )   
 
 
 
