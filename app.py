@@ -6,35 +6,54 @@ from io import BytesIO
 from PIL import Image, ImageDraw, ImageFont
 import gradio as gr
 
-# --- PATCH for gradio_client bug ---
+# --- PATCH for gradio_client bug (schema bool) ---
 import gradio_client.utils as gc_utils
 _original__json_schema_to_python_type = gc_utils._json_schema_to_python_type
+
 def _patched__json_schema_to_python_type(schema, defs=None):
     if isinstance(schema, bool):
         return "object"
     return _original__json_schema_to_python_type(schema, defs)
+
 gc_utils._json_schema_to_python_type = _patched__json_schema_to_python_type
+# --- END PATCH ---
 
 # ==============================
 # Configuration
 # ==============================
 POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt"
-MODEL_ENDPOINTS = {"Flux": "flux", "Turbo": "turbo"}
-TATTOO_STYLE_PROMPT = "tattoo design, white background, fine line art, professional tattoo flash, 8k, symmetrical, centered, isolated on white"
+MODEL_ENDPOINTS = {
+    "Flux": "flux",
+    "Turbo": "turbo",
+}
+
+TATTOO_STYLE_PROMPT = (
+    "tattoo design, white background, fine line art, professional tattoo flash, "
+    "8k, symmetrical, centered, isolated on white"
+)
+
 ASPECT_RATIOS = {
     "Square 1:1": (1024, 1024),
     "Vertical 2:3 (arm)": (768, 1152),
     "Vertical 9:16": (768, 1365),
     "Horizontal 3:2": (1152, 768),
 }
+
 BODY_AREAS = ["hand", "arm", "leg", "neck", "chest", "back"]
 TATTOO_TYPES = ["minimalist", "fine line", "traditional", "tribal", "geometric", "realism"]
-VALID_KEYS = {"ABC-123", "6F0E4C97-B72A4E69-A11BF6C4-AF6517E7"}
+
+VALID_KEYS = {
+    "ABC-123",
+    "DEF-456",
+    "6F0E4C97-B72A4E69-A11BF6C4-AF6517E7",
+}
 
 # ==============================
-# Image Processing
+# Image Processing logic
 # ==============================
+
 def add_watermark(img: Image.Image) -> Image.Image:
+    """Adds a simple watermark for the Free version."""
     img = img.copy()
     draw = ImageDraw.Draw(img)
     text = "TattooDesigner"
@@ -45,95 +64,149 @@ def add_watermark(img: Image.Image) -> Image.Image:
     return img
 
 def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
+    """Overlays the tattoo onto the body photo by removing the white background."""
     bg = Image.open(background_path).convert("RGBA")
     bg_w, bg_h = bg.size
+
+    # Convert tattoo and remove white background
     tattoo_rgba = tattoo_img.convert("RGBA")
     data = tattoo_rgba.getdata()
     new_data = []
     for item in data:
+        # If pixel is near white, make it transparent
         if item[0] > 215 and item[1] > 215 and item[2] > 215:
             new_data.append((255, 255, 255, 0))
         else:
+            # Opacity set to 215 for a realistic ink look on skin
             new_data.append((item[0], item[1], item[2], 215))
     tattoo_rgba.putdata(new_data)
+
+    # Resize proportionally based on slider
     t_w = int(bg_w * (scale / 100))
     w_percent = (t_w / float(tattoo_rgba.size[0]))
     t_h = int((float(tattoo_rgba.size[1]) * float(w_percent)))
     tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
+
+    # Calculate center position
     actual_x = int(bg_w * (x_pos / 100)) - (t_w // 2)
     actual_y = int(bg_h * (y_pos / 100)) - (t_h // 2)
+
+    # Composite overlay
     canvas = Image.new("RGBA", bg.size, (0, 0, 0, 0))
     canvas.paste(tattoo_rgba, (actual_x, actual_y))
     combined = Image.alpha_composite(bg, canvas)
     return combined.convert("RGB")
 
 def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
-    full_prompt = f"{user_prompt}, {TATTOO_STYLE_PROMPT}"
+    full_prompt = f"{user_prompt}, {TATTOO_STYLE_PROMPT}" if user_prompt else TATTOO_STYLE_PROMPT
     width, height = ASPECT_RATIOS.get(aspect_label, (1024, 1024))
     model_id = MODEL_ENDPOINTS.get(model_label, "flux")
-    params = {"width": width, "height": height, "model": model_id, "seed": int.from_bytes(os.urandom(2), "big"), "nologo": "true"}
+    params = {
+        "width": width, 
+        "height": height, 
+        "model": model_id, 
+        "seed": int.from_bytes(os.urandom(2), "big"), 
+        "nologo": "true"
+    }
     resp = requests.get(f"{POLLINATIONS_BASE_URL}/{requests.utils.quote(full_prompt)}", params=params, timeout=90)
-    if resp.status_code != 200: raise RuntimeError("API Error")
+    if resp.status_code != 200:
+        raise RuntimeError(f"Pollinations error {resp.status_code}")
     return Image.open(BytesIO(resp.content)).convert("RGB")
 
 # ==============================
-# Generation Logic
+# Main Generation Function
 # ==============================
+
 def generate_tattoo(prompt, body_photo_path, body_area, tattoo_type, model_label, aspect_label, license_key, x_pos, y_pos, scale):
-    if not prompt or not prompt.strip(): return None
+    if not prompt or not prompt.strip():
+        return None
+
     is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
-    if not is_pro: aspect_label = "Square 1:1"
+    if not is_pro:
+        aspect_label = "Square 1:1"
 
     enhanced_prompt = f"{prompt.strip()}, {tattoo_type} tattoo, placement on {body_area}, clean stencil reference"
+
     try:
         tattoo_design = call_sdxl_text2img(enhanced_prompt, aspect_label, model_label)
+        
         if body_photo_path:
             final_img = apply_tattoo_to_skin(body_photo_path, tattoo_design, x_pos, y_pos, scale)
         else:
             final_img = tattoo_design
+
         if not is_pro:
             final_img = final_img.resize((512, 512))
             final_img = add_watermark(final_img)
+
         return final_img
+
     except Exception as e:
         raise gr.Error(f"Generation failed: {str(e)}")
 
 # ==============================
-# UI
+# UI Gradio (Full English)
 # ==============================
+
 with gr.Blocks(title="TattooDesigner") as demo:
     gr.Markdown(
         """
         # TattooDesigner 🖋️
-        Upload a photo of your skin area, configure position, and generate your tattoo design.
-        **Backend:** Pollinations.ai
-        
-        **License:** Free (watermarked) vs PRO (full resolution, no watermark).
+
+        Upload a photo of the body area (hand/arm/leg/neck etc.), choose tattoo type, then generate the design.
+
+        **Backend:** Pollinations.ai (no API token required)
+
+        **Free vs PRO**
+        - Free: lower resolution + watermark
+        - PRO: full resolution, no watermark, using a license key from Gumroad
+
+        **Fixed style automatically added:**
+        `tattoo design, white background, fine line art, professional tattoo flash, 8k, symmetrical, centered, isolated on white`
+
+        **Usage & Licensing**
+        This app uses the Pollinations.AI image API. You own the designs you generate, but you are responsible for ensuring compliance with:
+        - [Pollinations.AI Terms](https://pollinations.ai/terms)
+        - The specific license of each underlying model.
         """
     )
 
     with gr.Row():
         with gr.Column():
-            user_prompt = gr.Textbox(label="Describe your tattoo idea", placeholder="e.g. minimalist rose on forearm", lines=3)
-            body_photo = gr.Image(label="Upload skin area photo", type="filepath")
+            user_prompt = gr.Textbox(
+                label="Describe the tattoo (in English)",
+                placeholder="e.g. a small fox with flowers, minimalistic, on the forearm",
+                lines=3,
+            )
+            body_photo = gr.Image(
+                label="Upload body area photo (hand/arm/leg/neck)",
+                type="filepath",
+            )
             
             with gr.Group():
-                gr.Markdown("### 📍 Overlay Settings")
+                gr.Markdown("### 📍 Overlay Position & Scale")
                 x_pos = gr.Slider(0, 100, value=50, label="Horizontal Position (%)")
                 y_pos = gr.Slider(0, 100, value=50, label="Vertical Position (%)")
-                scale = gr.Slider(5, 100, value=30, label="Tattoo Scale (%)")
+                scale = gr.Slider(5, 100, value=30, label="Tattoo Size (%)")
 
             body_area = gr.Dropdown(label="Body area", choices=BODY_AREAS, value="arm")
             tattoo_type = gr.Dropdown(label="Tattoo style", choices=TATTOO_TYPES, value="fine line")
-            model_choice = gr.Dropdown(label="AI Model", choices=list(MODEL_ENDPOINTS.keys()), value="Flux")
-            aspect = gr.Dropdown(label="Aspect Ratio", choices=list(ASPECT_RATIOS.keys()), value="Square 1:1")
-            license_key = gr.Textbox(label="License key", placeholder="Paste your PRO key here", type="password")
+            model_choice = gr.Dropdown(label="Model", choices=list(MODEL_ENDPOINTS.keys()), value="Flux")
+            aspect = gr.Dropdown(label="Aspect Ratio (PRO only)", choices=list(ASPECT_RATIOS.keys()), value="Square 1:1")
+            license_key = gr.Textbox(label="License key", placeholder="Paste your Gumroad license key here", type="password")
 
-            gr.Markdown("### Get PRO access\n[Buy TattooDesigner PRO on Gumroad](https://inkforge0.gumroad.com/l/tattoodesigner-pro)")
-            btn = gr.Button("Generate and Apply", variant="primary")
+            gr.Markdown(
+                """
+                ### PRO access
+                Don’t have a license yet?  
+                👉 [Get TattooDesigner PRO on Gumroad](https://inkforge0.gumroad.com/l/tattoodesigner-pro)
+                """
+            )
+
+            btn = gr.Button("Generate and Apply Tattoo", variant="primary")
 
         with gr.Column():
-            output_image = gr.Image(label="Final Design Preview", type="pil")
+            output_image = gr.Image(label="Final Result", type="pil")
 
     btn.click(
         fn=generate_tattoo,
@@ -142,8 +215,12 @@ with gr.Blocks(title="TattooDesigner") as demo:
     )
 
 if __name__ == "__main__":
+    # Fixed for Render/Cloud deployment (0.0.0.0 binding)
     port = int(os.environ.get("PORT", 7860))
-    demo.launch(server_name="0.0.0.0", server_port=port)
+    print(f"TattooDesigner starting on port {port}")
+    demo.launch(server_name="0.0.0.0", server_port=port)import os
+os.environ["GRADIO_ANALYTICS_ENABLED"] = "False
+    
 
 
 
