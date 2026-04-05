@@ -78,11 +78,15 @@ def add_watermark(img: Image.Image) -> Image.Image:
     draw = ImageDraw.Draw(img)
     text = "TattooDesigner"
     font = ImageFont.load_default()
-    text_w, text_h = draw.textsize(text, font=font)
+
+    # nou în loc de draw.textsize(...)
+    bbox = draw.textbbox((0, 0), text, font=font)
+    text_w = bbox[2] - bbox[0]
+    text_h = bbox[3] - bbox[1]
+
     w, h = img.size
     x = w - text_w - 10
     y = h - text_h - 10
-    # watermark simplu, negru
     draw.text((x, y), text, font=font, fill=(0, 0, 0))
     return img
 
