@@ -3,7 +3,7 @@ os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import requests
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageChops
 import gradio as gr
 
 # --- PATCH for gradio_client bug (schema bool) ---
@@ -42,16 +42,21 @@ ASPECT_RATIOS = {
 BODY_AREAS = ["hand", "arm", "leg", "neck", "chest", "back"]
 TATTOO_TYPES = ["minimalist", "fine line", "traditional", "tribal", "geometric", "realism"]
 
+# Auto placement defaults
 DEFAULT_X = 50
 DEFAULT_Y = 50
 AUTO_PLACEMENT = {
-    "hand": (52, 56),
-    "arm": (50, 44),
-    "leg": (50, 45),
-    "neck": (50, 35),
+    "hand": (52, 58),
+    "arm": (50, 45),
+    "leg": (50, 62),
+    "neck": (50, 38),
     "chest": (50, 42),
-    "back": (50, 47),
+    "back": (50, 48),
 }
+
+# Strict mode: reject if skin in placement zone is too low
+STRICT_SKIN_MODE = True
+MIN_SKIN_COVERAGE = 0.12  # 12%
 
 # DOAR PENTRU TEST – înlocuiești cu cheile reale de la Gumroad
 VALID_KEYS = {
@@ -80,32 +85,44 @@ def add_watermark(img: Image.Image) -> Image.Image:
     return img
 
 def resolve_position(body_area: str, x_pos: float, y_pos: float):
-    """
-    If sliders are untouched (50, 50), use area-based auto placement.
-    Otherwise, keep manual slider values.
-    """
+    """Use auto placement only if sliders remain unchanged."""
     if int(x_pos) == DEFAULT_X and int(y_pos) == DEFAULT_Y:
         return AUTO_PLACEMENT.get(body_area, (x_pos, y_pos))
     return x_pos, y_pos
 
 def _is_skin_pixel(r: int, g: int, b: int) -> bool:
-    max_c = max(r, g, b)
-    min_c = min(r, g, b)
+    """Simple RGB skin detector."""
+    mx = max(r, g, b)
+    mn = min(r, g, b)
     return (
-        r > 95 and g > 40 and b > 20 and
-        (max_c - min_c) > 15 and
-        abs(r - g) > 15 and
+        r > 85 and g > 35 and b > 20 and
+        (mx - mn) > 12 and
+        abs(r - g) > 10 and
         r > g and r > b
     )
 
-def _snap_to_skin(bg_rgb: Image.Image, x: int, y: int, max_radius: int = 220, step: int = 2):
-    """
-    Move anchor to nearest skin-like pixel if current point falls on background.
-    """
-    w, h = bg_rgb.size
+def _build_skin_mask(rgb_img: Image.Image) -> Image.Image:
+    """Build full-size mask where skin pixels are white."""
+    w, h = rgb_img.size
+    src = rgb_img.load()
+    mask = Image.new("L", (w, h), 0)
+    dst = mask.load()
+
+    for y in range(h):
+        for x in range(w):
+            r, g, b = src[x, y]
+            dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
+
+    # Soften edges for natural blending
+    mask = mask.filter(ImageFilter.GaussianBlur(2))
+    return mask
+
+def _snap_to_skin(rgb_img: Image.Image, x: int, y: int, max_radius: int = 220, step: int = 2):
+    """Move target point to nearest detected skin pixel."""
+    w, h = rgb_img.size
     x = max(0, min(x, w - 1))
     y = max(0, min(y, h - 1))
-    px = bg_rgb.load()
+    px = rgb_img.load()
 
     r, g, b = px[x, y]
     if _is_skin_pixel(r, g, b):
@@ -133,56 +150,92 @@ def _snap_to_skin(bg_rgb: Image.Image, x: int, y: int, max_radius: int = 220, st
 
 def prepare_tattoo_ink(tattoo_img: Image.Image) -> Image.Image:
     """
-    Converts generated artwork into stronger dark line-art with transparent background.
+    Convert generated artwork to realistic dark tattoo linework:
+    - white background removed
+    - stronger black lines
     """
     gray = ImageOps.grayscale(tattoo_img)
     gray = ImageOps.autocontrast(gray, cutoff=2)
-    gray = gray.filter(ImageFilter.MedianFilter(size=3))
+    gray = gray.filter(ImageFilter.MedianFilter(3))
 
-    # Darkness map: dark pixels become visible alpha; light pixels become transparent.
+    # Dark pixels => more visible alpha
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 35 else min(255, int(p * 2.0)))
+    alpha = inv.point(lambda p: 0 if p < 40 else min(255, int(p * 2.2)))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.8))
 
-    # Force near-black ink color for readable tattoo lines.
-    ink = Image.new("RGBA", gray.size, (18, 18, 18, 0))
+    ink = Image.new("RGBA", gray.size, (12, 12, 12, 0))
     ink.putalpha(alpha)
 
     bbox = ink.getbbox()
     if bbox:
         ink = ink.crop(bbox)
+
     return ink
 
 def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
-    """Overlays tattoo and snaps placement to skin area."""
+    """
+    Apply tattoo ONLY on skin pixels:
+    1) detect skin in body photo
+    2) snap target point to skin
+    3) combine tattoo alpha with skin mask
+    """
     bg = Image.open(background_path).convert("RGBA")
-    bg_w, bg_h = bg.size
     bg_rgb = bg.convert("RGB")
+    bg_w, bg_h = bg.size
+
+    skin_mask_full = _build_skin_mask(bg_rgb)
     tattoo_rgba = prepare_tattoo_ink(tattoo_img)
 
-    # Resize proportionally based on slider
+    # Resize tattoo from slider
     t_w = max(1, int(bg_w * (scale / 100)))
-    w_percent = (t_w / float(tattoo_rgba.size[0]))
-    t_h = max(1, int((float(tattoo_rgba.size[1]) * float(w_percent))))
+    ratio = t_w / float(tattoo_rgba.size[0])
+    t_h = max(1, int(tattoo_rgba.size[1] * ratio))
     tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
-    # Calculate center position and snap to nearest skin area
+    # Position + snap on skin
     center_x = int(bg_w * (x_pos / 100))
     center_y = int(bg_h * (y_pos / 100))
     center_x, center_y = _snap_to_skin(bg_rgb, center_x, center_y)
+
     actual_x = center_x - (t_w // 2)
     actual_y = center_y - (t_h // 2)
 
-    # Keep tattoo inside image bounds to prevent "next to photo" placements.
+    # Keep inside photo bounds
     max_x = max(0, bg_w - t_w)
     max_y = max(0, bg_h - t_h)
     actual_x = max(0, min(actual_x, max_x))
     actual_y = max(0, min(actual_y, max_y))
 
-    # Composite overlay
-    canvas = Image.new("RGBA", bg.size, (0, 0, 0, 0))
-    canvas.paste(tattoo_rgba, (actual_x, actual_y), tattoo_rgba)
-    combined = Image.alpha_composite(bg, canvas)
-    return combined.convert("RGB")
+    # Local skin ROI
+    roi_skin = skin_mask_full.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
+
+    # Strict mode: ensure enough skin where tattoo will be placed
+    if STRICT_SKIN_MODE:
+        hist = roi_skin.histogram()
+        skin_strength = sum(v * i for i, v in enumerate(hist))
+        max_strength = 255 * (t_w * t_h)
+        coverage = (skin_strength / max_strength) if max_strength else 0.0
+        if coverage < MIN_SKIN_COVERAGE:
+            raise gr.Error(
+                "Nu detectez suficienta piele in zona selectata. "
+                "Mută sliderele sau încarcă o poză mai clară."
+            )
+
+    # Keep tattoo only where skin exists
+    tattoo_alpha = tattoo_rgba.getchannel("A")
+    final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin)
+
+    # Realistic tattoo opacity
+    final_alpha = final_alpha.point(lambda p: int(p * 0.75))
+
+    tattoo_final = Image.new("RGBA", (t_w, t_h), (12, 12, 12, 0))
+    tattoo_final.putalpha(final_alpha)
+
+    layer = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+    layer.paste(tattoo_final, (actual_x, actual_y), tattoo_final)
+
+    out = Image.alpha_composite(bg, layer)
+    return out.convert("RGB")
 
 def call_sdxl_text2img(user_prompt: str, aspect_label: str, model_label: str):
     full_prompt = (
@@ -237,11 +290,11 @@ def generate_tattoo(
     # verificare simplă de PRO
     is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
 
-    # pentru Free, forțăm un aspect mai mic (de ex. Square)
+    # pentru Free, forțăm un aspect mai mic
     if not is_pro:
         aspect_label = "Square 1:1"
 
-    # Endpoint text-to-image; poza e păstrată doar ca referință în prompt
+    # Prompt mai strict pentru linework de tatuaj
     enhanced_prompt = (
         f"{prompt.strip()}, {tattoo_type} tattoo, placement on {body_area}, "
         f"clean stencil reference, black ink linework only, no shadows, no gray wash, no 3d render"
@@ -271,7 +324,7 @@ def generate_tattoo(
         raise gr.Error(f"Generation failed: {err}")
 
 # ==============================
-# UI Gradio (Full English + T&C)
+# UI Gradio
 # ==============================
 
 with gr.Blocks(title="TattooDesigner") as demo:
@@ -292,13 +345,13 @@ with gr.Blocks(title="TattooDesigner") as demo:
 
         **Usage & Licensing**
 
-        This app uses the Pollinations.AI image API (models such as "flux" / "turbo") as the backend generator.  
+        This app uses the Pollinations.AI image API (models such as "flux" / "turbo") as the backend generator.
         You own the designs you generate with this app, but you are responsible for ensuring that your use complies with:
-        - Pollinations.AI Terms and API documentation  
+        - Pollinations.AI Terms and API documentation
         - The specific license of each underlying model (some models allow commercial use, some do not)
 
         For more details, see:
-        - [https://pollinations.ai/terms](https://pollinations.ai/terms)  
+        - [https://pollinations.ai/terms](https://pollinations.ai/terms)
         - [https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md](https://raw.githubusercontent.com/pollinations/pollinations/master/APIDOCS.md)
         """
     )
@@ -317,8 +370,8 @@ with gr.Blocks(title="TattooDesigner") as demo:
 
             with gr.Group():
                 gr.Markdown("### 📍 Overlay Position & Scale")
-                x_pos = gr.Slider(0, 100, value=50, label="Horizontal Position (%)")
-                y_pos = gr.Slider(0, 100, value=50, label="Vertical Position (%)")
+                x_pos = gr.Slider(0, 100, value=DEFAULT_X, label="Horizontal Position (%)")
+                y_pos = gr.Slider(0, 100, value=DEFAULT_Y, label="Vertical Position (%)")
                 scale = gr.Slider(5, 100, value=30, label="Tattoo Size (%)")
 
             body_area = gr.Dropdown(
@@ -351,7 +404,7 @@ with gr.Blocks(title="TattooDesigner") as demo:
                 """
                 ### PRO access
 
-                Don’t have a license yet?  
+                Don’t have a license yet?
                 👉 [Get TattooDesigner PRO on Gumroad](https://inkforge0.gumroad.com/l/tattoodesigner-pro)
                 """
             )
