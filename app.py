@@ -3,7 +3,7 @@ os.environ["GRADIO_ANALYTICS_ENABLED"] = "False"
 
 import requests
 from io import BytesIO
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter
 import gradio as gr
 
 # --- PATCH for gradio_client bug (schema bool) ---
@@ -42,24 +42,22 @@ ASPECT_RATIOS = {
 BODY_AREAS = ["hand", "arm", "leg", "neck", "chest", "back"]
 TATTOO_TYPES = ["minimalist", "fine line", "traditional", "tribal", "geometric", "realism"]
 
+DEFAULT_X = 50
+DEFAULT_Y = 50
+AUTO_PLACEMENT = {
+    "hand": (52, 56),
+    "arm": (50, 44),
+    "leg": (50, 45),
+    "neck": (50, 35),
+    "chest": (50, 42),
+    "back": (50, 47),
+}
+
 # DOAR PENTRU TEST – înlocuiești cu cheile reale de la Gumroad
 VALID_KEYS = {
     "ABC-123",
     "DEF-456",
     "6F0E4C97-B72A4E69-A11BF6C4-AF6517E7",
-}
-
-# Dacă utilizatorul lasă sliderele pe default, aplicăm auto-placement pe zonă
-DEFAULT_X = 50
-DEFAULT_Y = 50
-
-AUTO_PLACEMENT = {
-    "hand": (50, 58),
-    "arm": (50, 45),
-    "leg": (50, 62),
-    "neck": (50, 38),
-    "chest": (50, 42),
-    "back": (50, 48),
 }
 
 # ==============================
@@ -84,34 +82,82 @@ def add_watermark(img: Image.Image) -> Image.Image:
 def resolve_position(body_area: str, x_pos: float, y_pos: float):
     """
     If sliders are untouched (50, 50), use area-based auto placement.
-    Otherwise, keep user's manual slider values.
+    Otherwise, keep manual slider values.
     """
     if int(x_pos) == DEFAULT_X and int(y_pos) == DEFAULT_Y:
         return AUTO_PLACEMENT.get(body_area, (x_pos, y_pos))
     return x_pos, y_pos
 
+def _is_skin_pixel(r: int, g: int, b: int) -> bool:
+    max_c = max(r, g, b)
+    min_c = min(r, g, b)
+    return (
+        r > 95 and g > 40 and b > 20 and
+        (max_c - min_c) > 15 and
+        abs(r - g) > 15 and
+        r > g and r > b
+    )
+
+def _snap_to_skin(bg_rgb: Image.Image, x: int, y: int, max_radius: int = 220, step: int = 2):
+    """
+    Move anchor to nearest skin-like pixel if current point falls on background.
+    """
+    w, h = bg_rgb.size
+    x = max(0, min(x, w - 1))
+    y = max(0, min(y, h - 1))
+    px = bg_rgb.load()
+
+    r, g, b = px[x, y]
+    if _is_skin_pixel(r, g, b):
+        return x, y
+
+    for radius in range(step, max_radius + 1, step):
+        left = max(0, x - radius)
+        right = min(w - 1, x + radius)
+        top = max(0, y - radius)
+        bottom = min(h - 1, y + radius)
+
+        for xx in range(left, right + 1, step):
+            for yy in (top, bottom):
+                r, g, b = px[xx, yy]
+                if _is_skin_pixel(r, g, b):
+                    return xx, yy
+
+        for yy in range(top, bottom + 1, step):
+            for xx in (left, right):
+                r, g, b = px[xx, yy]
+                if _is_skin_pixel(r, g, b):
+                    return xx, yy
+
+    return x, y
+
+def prepare_tattoo_ink(tattoo_img: Image.Image) -> Image.Image:
+    """
+    Converts generated artwork into stronger dark line-art with transparent background.
+    """
+    gray = ImageOps.grayscale(tattoo_img)
+    gray = ImageOps.autocontrast(gray, cutoff=2)
+    gray = gray.filter(ImageFilter.MedianFilter(size=3))
+
+    # Darkness map: dark pixels become visible alpha; light pixels become transparent.
+    inv = ImageOps.invert(gray)
+    alpha = inv.point(lambda p: 0 if p < 35 else min(255, int(p * 2.0)))
+
+    # Force near-black ink color for readable tattoo lines.
+    ink = Image.new("RGBA", gray.size, (18, 18, 18, 0))
+    ink.putalpha(alpha)
+
+    bbox = ink.getbbox()
+    if bbox:
+        ink = ink.crop(bbox)
+    return ink
+
 def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
-    """Overlays the tattoo onto the body photo by removing the white background."""
+    """Overlays tattoo and snaps placement to skin area."""
     bg = Image.open(background_path).convert("RGBA")
     bg_w, bg_h = bg.size
-
-    # Convert tattoo and remove white background
-    tattoo_rgba = tattoo_img.convert("RGBA")
-    data = tattoo_rgba.getdata()
-    new_data = []
-    for item in data:
-        # If pixel is near white, make it transparent
-        if item[0] > 215 and item[1] > 215 and item[2] > 215:
-            new_data.append((255, 255, 255, 0))
-        else:
-            # Opacity set to 215 for a realistic ink look on skin
-            new_data.append((item[0], item[1], item[2], 215))
-    tattoo_rgba.putdata(new_data)
-
-    # Crop transparent margins so placement uses real tattoo bounds, not a large white canvas.
-    alpha_bbox = tattoo_rgba.getbbox()
-    if alpha_bbox:
-        tattoo_rgba = tattoo_rgba.crop(alpha_bbox)
+    bg_rgb = bg.convert("RGB")
+    tattoo_rgba = prepare_tattoo_ink(tattoo_img)
 
     # Resize proportionally based on slider
     t_w = max(1, int(bg_w * (scale / 100)))
@@ -119,9 +165,12 @@ def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
     t_h = max(1, int((float(tattoo_rgba.size[1]) * float(w_percent))))
     tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
-    # Calculate center position
-    actual_x = int(bg_w * (x_pos / 100)) - (t_w // 2)
-    actual_y = int(bg_h * (y_pos / 100)) - (t_h // 2)
+    # Calculate center position and snap to nearest skin area
+    center_x = int(bg_w * (x_pos / 100))
+    center_y = int(bg_h * (y_pos / 100))
+    center_x, center_y = _snap_to_skin(bg_rgb, center_x, center_y)
+    actual_x = center_x - (t_w // 2)
+    actual_y = center_y - (t_h // 2)
 
     # Keep tattoo inside image bounds to prevent "next to photo" placements.
     max_x = max(0, bg_w - t_w)
@@ -195,16 +244,16 @@ def generate_tattoo(
     # Endpoint text-to-image; poza e păstrată doar ca referință în prompt
     enhanced_prompt = (
         f"{prompt.strip()}, {tattoo_type} tattoo, placement on {body_area}, "
-        f"clean stencil reference"
+        f"clean stencil reference, black ink linework only, no shadows, no gray wash, no 3d render"
     )
 
     try:
         tattoo_design = call_sdxl_text2img(enhanced_prompt, aspect_label, model_label)
 
         if body_photo_path:
-            final_x, final_y = resolve_position(body_area, x_pos, y_pos)
+            x_pos, y_pos = resolve_position(body_area, x_pos, y_pos)
             final_img = apply_tattoo_to_skin(
-                body_photo_path, tattoo_design, final_x, final_y, scale
+                body_photo_path, tattoo_design, x_pos, y_pos, scale
             )
         else:
             final_img = tattoo_design
@@ -268,8 +317,8 @@ with gr.Blocks(title="TattooDesigner") as demo:
 
             with gr.Group():
                 gr.Markdown("### 📍 Overlay Position & Scale")
-                x_pos = gr.Slider(0, 100, value=DEFAULT_X, label="Horizontal Position (%)")
-                y_pos = gr.Slider(0, 100, value=DEFAULT_Y, label="Vertical Position (%)")
+                x_pos = gr.Slider(0, 100, value=50, label="Horizontal Position (%)")
+                y_pos = gr.Slider(0, 100, value=50, label="Vertical Position (%)")
                 scale = gr.Slider(5, 100, value=30, label="Tattoo Size (%)")
 
             body_area = gr.Dropdown(
