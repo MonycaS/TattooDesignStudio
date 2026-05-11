@@ -48,7 +48,7 @@ DEFAULT_Y = 50
 AUTO_PLACEMENT = {
     "hand": (52, 58),
     "arm": (50, 45),
-    "leg": (50, 62),
+    "leg": (50, 48),
     "neck": (50, 38),
     "chest": (50, 42),
     "back": (50, 48),
