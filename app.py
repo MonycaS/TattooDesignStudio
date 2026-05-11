@@ -150,20 +150,25 @@ def _snap_to_skin(rgb_img: Image.Image, x: int, y: int, max_radius: int = 220, s
 
 def prepare_tattoo_ink(tattoo_img: Image.Image) -> Image.Image:
     """
-    Convert generated artwork to realistic dark tattoo linework:
-    - white background removed
-    - stronger black lines
+    Hard black line-art mask:
+    - elimină complet fundalul alb/gri deschis
+    - păstrează doar liniile închise la culoare
+    - fără blur => fără umbră
     """
-    gray = ImageOps.grayscale(tattoo_img)
-    gray = ImageOps.autocontrast(gray, cutoff=2)
-    gray = gray.filter(ImageFilter.MedianFilter(3))
+    rgb = tattoo_img.convert("RGB")
+    gray = ImageOps.grayscale(rgb)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
 
-    # Dark pixels => more visible alpha
-    inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 40 else min(255, int(p * 2.2)))
-    alpha = alpha.filter(ImageFilter.GaussianBlur(0.8))
+    # Alpha hard: doar pixelii suficient de inchisi raman.
+    # Prag mai mic = mai multe detalii; mai mare = linii mai curate.
+    THRESH = 110
+    alpha = gray.point(lambda p: 255 if p < THRESH else 0)
 
-    ink = Image.new("RGBA", gray.size, (12, 12, 12, 0))
+    # Curatare puncte mici/zgomot
+    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    alpha = alpha.filter(ImageFilter.MaxFilter(3))
+
+    ink = Image.new("RGBA", gray.size, (8, 8, 8, 0))
     ink.putalpha(alpha)
 
     bbox = ink.getbbox()
