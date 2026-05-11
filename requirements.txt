@@ -1,8 +1,7 @@
-Pillow
-requests
 gradio
+requests
+pillow
 gradio_client
-numpy
 
 
 
