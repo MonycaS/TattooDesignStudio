@@ -136,7 +136,7 @@ def apply_tattoo_to_skin(
     y_pos,
     scale,
     rotation=0,
-    opacity=140,
+    opacity=90,
 ):
 
     bg = Image.open(
@@ -170,9 +170,9 @@ def apply_tattoo_to_skin(
 
     tattoo = Image.fromarray(arr)
 
-    # smoother edges
+    # softer edges
     tattoo = tattoo.filter(
-        ImageFilter.GaussianBlur(0.6)
+        ImageFilter.GaussianBlur(0.2)
     )
 
     # -----------------------------
@@ -220,33 +220,28 @@ def apply_tattoo_to_skin(
     )
 
     # -----------------------------
-    # overlay
+    # tattoo layer
     # -----------------------------
 
-    overlay = Image.new(
+    tattoo_layer = Image.new(
         "RGBA",
         bg.size,
         (0, 0, 0, 0)
     )
 
-    overlay.paste(
+    tattoo_layer.paste(
         tattoo,
         (actual_x, actual_y),
         tattoo
     )
 
     # -----------------------------
-    # realistic blend
+    # realistic composite
     # -----------------------------
 
-    combined = Image.blend(
+    combined = Image.alpha_composite(
         bg,
-        overlay,
-        alpha=0.38
-    )
-
-    combined = combined.filter(
-        ImageFilter.GaussianBlur(0.15)
+        tattoo_layer
     )
 
     return combined.convert("RGB")
@@ -434,7 +429,7 @@ Generate realistic tattoo previews directly on body photos.
             user_prompt = gr.Textbox(
                 label="Describe the tattoo",
                 placeholder=(
-                    "e.g. dragon fine line tattoo"
+                    "e.g. black spider tattoo stencil"
                 ),
                 lines=3,
             )
@@ -477,9 +472,9 @@ Generate realistic tattoo previews directly on body photos.
             )
 
             opacity = gr.Slider(
-                50,
+                30,
                 255,
-                value=140,
+                value=90,
                 label="Tattoo Opacity",
             )
 
