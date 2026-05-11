@@ -51,7 +51,7 @@ MODEL_ENDPOINTS = {
 TATTOO_STYLE_PROMPT = (
     "isolated tattoo design, "
     "pure white background, "
-    "black ink tattoo, "
+    "black ink only, "
     "professional tattoo stencil, "
     "centered composition, "
     "no human, no body, no skin"
@@ -136,7 +136,7 @@ def apply_tattoo_to_skin(
     y_pos,
     scale,
     rotation=0,
-    opacity=110,
+    opacity=160,
 ):
 
     bg = Image.open(
@@ -149,35 +149,41 @@ def apply_tattoo_to_skin(
     # CLEAN TATTOO
     # ==============================
 
-    # grayscale
-    tattoo = tattoo_img.convert("L")
-
-    # strong threshold
-    tattoo = tattoo.point(
-        lambda p: 0 if p < 180 else 255
-    )
-
-    # back to RGBA
-    tattoo = tattoo.convert("RGBA")
+    tattoo = tattoo_img.convert("RGBA")
 
     arr = np.array(tattoo)
 
-    r, g, b, a = arr.T
+    r = arr[:, :, 0]
+    g = arr[:, :, 1]
+    b = arr[:, :, 2]
 
-    # remove white
+    # remove white background
     white_mask = (
-        (r > 240) &
-        (g > 240) &
-        (b > 240)
+        (r > 235) &
+        (g > 235) &
+        (b > 235)
     )
 
-    # pure black ink
-    arr[..., 0] = 0
-    arr[..., 1] = 0
-    arr[..., 2] = 0
+    # grayscale tattoo
+    gray = (
+        0.299 * r +
+        0.587 * g +
+        0.114 * b
+    ).astype(np.uint8)
+
+    # darker tattoo ink
+    dark = np.clip(
+        gray * 0.38,
+        0,
+        255
+    ).astype(np.uint8)
+
+    arr[:, :, 0] = dark
+    arr[:, :, 1] = dark
+    arr[:, :, 2] = dark
 
     # transparency
-    arr[..., 3] = np.where(
+    arr[:, :, 3] = np.where(
         white_mask,
         0,
         opacity
@@ -187,7 +193,7 @@ def apply_tattoo_to_skin(
 
     # soften edges slightly
     tattoo = tattoo.filter(
-        ImageFilter.GaussianBlur(0.15)
+        ImageFilter.GaussianBlur(0.2)
     )
 
     # ==============================
@@ -489,7 +495,7 @@ Generate realistic tattoo previews directly on body photos.
             opacity = gr.Slider(
                 30,
                 255,
-                value=110,
+                value=160,
                 label="Tattoo Opacity",
             )
 
