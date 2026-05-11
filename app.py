@@ -201,7 +201,10 @@ def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
     gray = gray.filter(ImageFilter.MedianFilter(3))
 
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 255 if p > 135 else 0)
+
+    # Hard extraction (slightly stricter threshold to reduce artifacts)
+    alpha = inv.point(lambda p: 255 if p > 145 else 0)
+
     alpha = alpha.filter(ImageFilter.MinFilter(3))
     alpha = alpha.filter(ImageFilter.MaxFilter(3))
     alpha = _remove_border_connected(alpha, threshold=10)
@@ -260,7 +263,7 @@ def warp_cylindrical(alpha: Image.Image, strength=0.12) -> Image.Image:
 
 def extract_texture_overlay(roi_bg: Image.Image, amount=0.16):
     """
-    Subtle skin texture transfer on top of tattoo region.
+    Subtle skin texture transfer.
     """
     amount = max(0.0, min(0.5, amount))
     gray = ImageOps.grayscale(roi_bg)
@@ -324,7 +327,7 @@ def apply_tattoo_realistic(
     roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
-    # Remove weak spill pixels
+    # Remove weak spill
     final_alpha = final_alpha.point(lambda p: 0 if p < 35 else p)
 
     # Adaptive realism
@@ -351,16 +354,18 @@ def apply_tattoo_realistic(
     multiplied = ImageChops.multiply(roi_bg, tattoo_tone)
     roi_out = Image.composite(multiplied, roi_bg, final_alpha)
 
-    # Texture transfer
+    # Texture transfer ONLY on tattoo area (prevents black rectangle artifacts)
     tex = extract_texture_overlay(roi_bg, amount=0.14)
-    roi_out = ImageChops.multiply(roi_out, tex)
+    tex_multiplied = ImageChops.multiply(roi_out, tex)
+    roi_out = Image.composite(tex_multiplied, roi_out, final_alpha)
 
-    # Subtle grain
+    # Subtle grain ONLY on tattoo area
     if realism_strength > 35:
         noise = Image.effect_noise((t_w, t_h), sigma=4).convert("L")
         noise = noise.point(lambda p: int(120 + (p - 128) * 0.35))
         noise_rgb = Image.merge("RGB", (noise, noise, noise))
-        roi_out = ImageChops.multiply(roi_out, noise_rgb)
+        noisy = ImageChops.multiply(roi_out, noise_rgb)
+        roi_out = Image.composite(noisy, roi_out, final_alpha)
 
     out = bg_rgb.copy()
     out.paste(roi_out, (actual_x, actual_y))
@@ -434,7 +439,7 @@ def generate_tattoo(
     if body_photo_path:
         rx, ry = resolve_position(body_area, leg_placement, x_pos, y_pos)
         final_img = apply_tattoo_realistic(
-            background_path=body_photo_path,  # FIXED: correct keyword
+            background_path=body_photo_path,  # fixed keyword
             tattoo_img=tattoo_design,
             x_pos=rx,
             y_pos=ry,
