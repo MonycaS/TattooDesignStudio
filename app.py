@@ -196,22 +196,35 @@ def _remove_border_connected(alpha: Image.Image, threshold=10) -> Image.Image:
     return alpha
 
 def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
+    """
+    Safe extraction: keep only line-like dark strokes, avoid filled rectangles.
+    """
     gray = ImageOps.grayscale(tattoo_img)
-    gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray = ImageOps.autocontrast(gray, cutoff=2)
     gray = gray.filter(ImageFilter.MedianFilter(3))
 
-    inv = ImageOps.invert(gray)
+    # Edge-based mask (prevents solid black box artifacts)
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageOps.autocontrast(edges, cutoff=1)
 
-    # Hard extraction (slightly stricter threshold to reduce artifacts)
-    alpha = inv.point(lambda p: 255 if p > 145 else 0)
+    # Keep strong edges only
+    alpha = edges.point(lambda p: 255 if p > 35 else 0)
 
-    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    # Thicken lines slightly
     alpha = alpha.filter(ImageFilter.MaxFilter(3))
+
+    # Remove any component touching image borders
     alpha = _remove_border_connected(alpha, threshold=10)
 
+    # Final cleanup
+    alpha = alpha.filter(ImageFilter.MinFilter(3))
     bbox = alpha.getbbox()
     if bbox:
         alpha = alpha.crop(bbox)
+    else:
+        # Fallback tiny dot mask to avoid empty crashes
+        alpha = Image.new("L", (8, 8), 0)
+        alpha.putpixel((4, 4), 255)
 
     return alpha
 
@@ -292,20 +305,16 @@ def apply_tattoo_realistic(
     skin_mask_full = build_skin_mask(bg_rgb)
     tattoo_alpha = prepare_tattoo_alpha(tattoo_img)
 
-    # Size
     t_w = max(1, int(bg_w * (scale / 100)))
     ratio = t_w / float(tattoo_alpha.size[0])
     t_h = max(1, int(tattoo_alpha.size[1] * ratio))
     tattoo_alpha = tattoo_alpha.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
-    # Curvature warp
     tattoo_alpha = warp_cylindrical(tattoo_alpha, strength=curvature_strength)
 
-    # Minimal edge softening
     if edge_blur > 0:
         tattoo_alpha = tattoo_alpha.filter(ImageFilter.GaussianBlur(edge_blur))
 
-    # Placement
     center_x = int(bg_w * (x_pos / 100))
     center_y = int(bg_h * (y_pos / 100))
     center_x, center_y = snap_to_skin(bg_rgb, center_x, center_y)
@@ -314,58 +323,33 @@ def apply_tattoo_realistic(
     actual_y = max(0, min(center_y - t_h // 2, max(0, bg_h - t_h)))
 
     roi_skin = skin_mask_full.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
+    roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
 
     if strict_skin_mode:
-        hist = roi_skin.histogram()
-        skin_strength = sum(v * i for i, v in enumerate(hist))
-        max_strength = 255 * (t_w * t_h)
-        coverage = (skin_strength / max_strength) if max_strength else 0.0
+        hist = roi_skin_hard.histogram()
+        skin_pixels = hist[255]
+        coverage = skin_pixels / float(t_w * t_h)
         if coverage < 0.10:
-            raise gr.Error("Not enough skin detected in the selected area. Move sliders or use a clearer photo.")
+            raise gr.Error("Not enough skin detected in selected area.")
 
-    # Hard clip to skin
-    roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
+    # Tattoo only where both alpha and skin exist
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
-    # Remove weak spill
-    final_alpha = final_alpha.point(lambda p: 0 if p < 35 else p)
+    # Drop weak pixels
+    final_alpha = final_alpha.point(lambda p: 0 if p < 60 else p)
 
-    # Adaptive realism
-    alpha_gain = 0.22 + (realism_strength / 100.0) * 0.62
+    # Strength control
+    alpha_gain = 0.35 + (realism_strength / 100.0) * 0.45
     final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
-
-    # Edge attenuation
-    falloff = make_radial_falloff_mask((t_w, t_h), softness=0.30)
-    falloff = falloff.filter(ImageFilter.GaussianBlur(1.2))
-    final_alpha = ImageChops.multiply(final_alpha, falloff)
 
     roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
 
-    # Preserve highlights
-    lum = ImageOps.grayscale(roi_bg)
-    highlight_suppress = lum.point(lambda p: int(255 - max(0, p - 175) * 1.6))
-    final_alpha = ImageChops.multiply(final_alpha, highlight_suppress)
-
-    # Tattoo tone
-    dark = int(max(0, min(65, 65 - int(ink_darkness))))
+    dark = int(max(0, min(60, 60 - int(ink_darkness))))
     tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
 
-    # Multiply blend
+    # Simple multiply blend only (no texture/noise in safe mode)
     multiplied = ImageChops.multiply(roi_bg, tattoo_tone)
     roi_out = Image.composite(multiplied, roi_bg, final_alpha)
-
-    # Texture transfer ONLY on tattoo area (prevents black rectangle artifacts)
-    tex = extract_texture_overlay(roi_bg, amount=0.14)
-    tex_multiplied = ImageChops.multiply(roi_out, tex)
-    roi_out = Image.composite(tex_multiplied, roi_out, final_alpha)
-
-    # Subtle grain ONLY on tattoo area
-    if realism_strength > 35:
-        noise = Image.effect_noise((t_w, t_h), sigma=4).convert("L")
-        noise = noise.point(lambda p: int(120 + (p - 128) * 0.35))
-        noise_rgb = Image.merge("RGB", (noise, noise, noise))
-        noisy = ImageChops.multiply(roi_out, noise_rgb)
-        roi_out = Image.composite(noisy, roi_out, final_alpha)
 
     out = bg_rgb.copy()
     out.paste(roi_out, (actual_x, actual_y))
