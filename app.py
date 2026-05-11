@@ -197,34 +197,39 @@ def _remove_border_connected(alpha: Image.Image, threshold=10) -> Image.Image:
 
 def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
     """
-    Safe extraction: keep only line-like dark strokes, avoid filled rectangles.
+    Shape-preserving tattoo mask:
+    - removes white background
+    - keeps dark subject mass (not only edges)
+    - removes border artifacts
     """
     gray = ImageOps.grayscale(tattoo_img)
-    gray = ImageOps.autocontrast(gray, cutoff=2)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
     gray = gray.filter(ImageFilter.MedianFilter(3))
 
-    # Edge-based mask (prevents solid black box artifacts)
-    edges = gray.filter(ImageFilter.FIND_EDGES)
-    edges = ImageOps.autocontrast(edges, cutoff=1)
+    # Dark pixels -> visible alpha (preserves filled/continuous forms)
+    inv = ImageOps.invert(gray)
+    alpha = inv.point(lambda p: 0 if p < 70 else min(255, int((p - 70) * 1.9)))
 
-    # Keep strong edges only
-    alpha = edges.point(lambda p: 255 if p > 35 else 0)
-
-    # Thicken lines slightly
+    # Morphological cleanup (connect broken lines, remove dust)
     alpha = alpha.filter(ImageFilter.MaxFilter(3))
-
-    # Remove any component touching image borders
-    alpha = _remove_border_connected(alpha, threshold=10)
-
-    # Final cleanup
     alpha = alpha.filter(ImageFilter.MinFilter(3))
+
+    # Remove background chunks touching borders
+    alpha = _remove_border_connected(alpha, threshold=12)
+
+    # Harden weak remnants
+    alpha = alpha.point(lambda p: 255 if p > 35 else 0)
+
+    # Slight soften so it doesn't look jagged
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
+
     bbox = alpha.getbbox()
     if bbox:
         alpha = alpha.crop(bbox)
     else:
-        # Fallback tiny dot mask to avoid empty crashes
-        alpha = Image.new("L", (8, 8), 0)
-        alpha.putpixel((4, 4), 255)
+        # fallback if model returned almost blank content
+        alpha = Image.new("L", (16, 16), 0)
+        alpha.putpixel((8, 8), 255)
 
     return alpha
 
@@ -336,7 +341,7 @@ def apply_tattoo_realistic(
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
     # Drop weak pixels
-    final_alpha = final_alpha.point(lambda p: 0 if p < 60 else p)
+    final_alpha = final_alpha.point(lambda p: 0 if p < 28 else p)
 
     # Strength control
     alpha_gain = 0.35 + (realism_strength / 100.0) * 0.45
