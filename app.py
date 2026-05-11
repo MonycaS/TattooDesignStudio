@@ -110,6 +110,12 @@ def _is_skin_pixel(r, g, b):
     )
 
 def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
+    """
+    Hard skin mask:
+    - 255 doar pe piele
+    - 0 in rest
+    - curatare zgomot fara blur mare
+    """
     w, h = rgb_img.size
     src = rgb_img.load()
     mask = Image.new("L", (w, h), 0)
@@ -120,7 +126,13 @@ def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
             r, g, b = src[x, y]
             dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
 
-    return mask.filter(ImageFilter.GaussianBlur(2))
+    # curatare zgomot, fara scurgeri spre fundal
+    mask = mask.filter(ImageFilter.MinFilter(3))
+    mask = mask.filter(ImageFilter.MaxFilter(5))
+
+    # threshold hard
+    mask = mask.point(lambda p: 255 if p >= 128 else 0)
+    return mask
 
 def snap_to_skin(rgb_img: Image.Image, x, y, max_radius=220, step=2):
     w, h = rgb_img.size
@@ -230,7 +242,6 @@ def apply_tattoo_realistic(
     actual_y = max(0, min(center_y - t_h // 2, max(0, bg_h - t_h)))
 
     roi_skin = skin_mask_full.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
-    final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin)
 
     if strict_skin_mode:
         hist = roi_skin.histogram()
@@ -240,15 +251,21 @@ def apply_tattoo_realistic(
         if coverage < 0.10:
             raise gr.Error("Nu detectez suficienta piele in zona selectata. Muta pozitia sau schimba poza.")
 
-    # control realism
-    # realism_strength 0..100 => 0.25..0.85
+    # HARD clip pe piele: daca nu e piele => alpha 0
+    roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
+    final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
+
+    # scoate pixelii slabi care arata ca "umbre"
+    final_alpha = final_alpha.point(lambda p: 0 if p < 35 else p)
+
+    # realism strength 0..100 => 0.25..0.85
     alpha_gain = 0.25 + (realism_strength / 100.0) * 0.60
     final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
 
     roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
 
     # tatuaj culoare aproape neagra, dar reglabila
-    dark = int(max(0, min(60, 60 - int(ink_darkness))))  # mai mare ink_darkness => mai inchis
+    dark = int(max(0, min(60, 60 - int(ink_darkness))))
     tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
 
     # Multiply blend pentru efect "sub piele"
@@ -325,7 +342,7 @@ with gr.Blocks(title="TattooDesigner Pro-Look") as demo:
         """
 # TattooDesigner Pro-Look
 
-Genereaza design + il aplica realist pe piele (skin-aware, multiply blend, no square artifacts).
+Genereaza design + il aplica realist pe piele (skin-aware, multiply blend, hard skin clipping).
 
 **Tip prompt bun:**  
 `single rose flower, black fine line tattoo stencil, clean contours, centered, no shading`
@@ -364,7 +381,7 @@ Genereaza design + il aplica realist pe piele (skin-aware, multiply blend, no sq
                 gr.Markdown("### Realism controls")
                 realism_strength = gr.Slider(0, 100, value=68, label="Realism strength")
                 ink_darkness = gr.Slider(0, 100, value=78, label="Ink darkness")
-                edge_blur = gr.Slider(0.0, 2.0, value=0.5, step=0.1, label="Edge blur")
+                edge_blur = gr.Slider(0.0, 2.0, value=0.2, step=0.1, label="Edge blur")
                 strict_skin_mode = gr.Checkbox(value=STRICT_SKIN_DEFAULT, label="Strict skin mode")
 
             license_key = gr.Textbox(
