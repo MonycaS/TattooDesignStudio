@@ -5,6 +5,7 @@ import requests
 import numpy as np
 
 from io import BytesIO
+
 from PIL import (
     Image,
     ImageDraw,
@@ -14,27 +15,33 @@ from PIL import (
 
 import gradio as gr
 
-# --- PATCH for gradio_client bug (schema bool) ---
+# ==============================
+# PATCH for gradio_client bug
+# ==============================
+
 import gradio_client.utils as gc_utils
 
-_original__json_schema_to_python_type = gc_utils._json_schema_to_python_type
-
+_original__json_schema_to_python_type = (
+    gc_utils._json_schema_to_python_type
+)
 
 def _patched__json_schema_to_python_type(schema, defs=None):
     if isinstance(schema, bool):
         return "object"
+
     return _original__json_schema_to_python_type(schema, defs)
 
-
-gc_utils._json_schema_to_python_type = _patched__json_schema_to_python_type
-# --- END PATCH ---
-
+gc_utils._json_schema_to_python_type = (
+    _patched__json_schema_to_python_type
+)
 
 # ==============================
-# Configuration
+# CONFIG
 # ==============================
 
-POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt"
+POLLINATIONS_BASE_URL = (
+    "https://image.pollinations.ai/prompt"
+)
 
 MODEL_ENDPOINTS = {
     "Flux": "flux",
@@ -42,9 +49,12 @@ MODEL_ENDPOINTS = {
 }
 
 TATTOO_STYLE_PROMPT = (
-    "tattoo design, white background, fine line art, "
-    "professional tattoo flash, 8k, symmetrical, "
-    "centered, isolated on white"
+    "isolated tattoo design, "
+    "pure white background, "
+    "black ink only, "
+    "professional tattoo stencil, "
+    "centered composition, "
+    "no human, no body, no skin"
 )
 
 ASPECT_RATIOS = {
@@ -72,19 +82,18 @@ TATTOO_TYPES = [
     "realism",
 ]
 
-# TEST LICENSES
 VALID_KEYS = {
     "ABC-123",
     "DEF-456",
     "6F0E4C97-B72A4E69-A11BF6C4-AF6517E7",
 }
 
-
 # ==============================
-# Watermark
+# WATERMARK
 # ==============================
 
-def add_watermark(img: Image.Image) -> Image.Image:
+def add_watermark(img: Image.Image):
+
     img = img.copy()
 
     draw = ImageDraw.Draw(img)
@@ -93,7 +102,11 @@ def add_watermark(img: Image.Image) -> Image.Image:
 
     font = ImageFont.load_default()
 
-    bbox = draw.textbbox((0, 0), text, font=font)
+    bbox = draw.textbbox(
+        (0, 0),
+        text,
+        font=font
+    )
 
     text_w = bbox[2] - bbox[0]
     text_h = bbox[3] - bbox[1]
@@ -112,9 +125,8 @@ def add_watermark(img: Image.Image) -> Image.Image:
 
     return img
 
-
 # ==============================
-# Better Tattoo Overlay
+# TATTOO OVERLAY
 # ==============================
 
 def apply_tattoo_to_skin(
@@ -124,22 +136,17 @@ def apply_tattoo_to_skin(
     y_pos,
     scale,
     rotation=0,
-    opacity=180,
+    opacity=140,
 ):
-    """
-    Realistic tattoo overlay:
-    - removes white background
-    - smooth edges
-    - transparency
-    - blend effect
-    """
 
-    bg = Image.open(background_path).convert("RGBA")
+    bg = Image.open(
+        background_path
+    ).convert("RGBA")
 
     bg_w, bg_h = bg.size
 
     # -----------------------------
-    # Tattoo image
+    # tattoo image
     # -----------------------------
 
     tattoo = tattoo_img.convert("RGBA")
@@ -148,14 +155,13 @@ def apply_tattoo_to_skin(
 
     r, g, b, a = arr.T
 
-    # remove white pixels
+    # remove white background
     white_mask = (
         (r > 240) &
         (g > 240) &
         (b > 240)
     )
 
-    # transparent background
     arr[..., 3] = np.where(
         white_mask,
         0,
@@ -164,20 +170,24 @@ def apply_tattoo_to_skin(
 
     tattoo = Image.fromarray(arr)
 
-    # soften edges
+    # smoother edges
     tattoo = tattoo.filter(
         ImageFilter.GaussianBlur(0.6)
     )
 
     # -----------------------------
-    # Resize
+    # resize
     # -----------------------------
 
-    t_w = int(bg_w * (scale / 100))
+    t_w = int(
+        bg_w * (scale / 100)
+    )
 
     ratio = t_w / tattoo.size[0]
 
-    t_h = int(tattoo.size[1] * ratio)
+    t_h = int(
+        tattoo.size[1] * ratio
+    )
 
     tattoo = tattoo.resize(
         (t_w, t_h),
@@ -185,7 +195,7 @@ def apply_tattoo_to_skin(
     )
 
     # -----------------------------
-    # Rotate
+    # rotation
     # -----------------------------
 
     tattoo = tattoo.rotate(
@@ -196,14 +206,21 @@ def apply_tattoo_to_skin(
     t_w, t_h = tattoo.size
 
     # -----------------------------
-    # Position
+    # position
     # -----------------------------
 
-    actual_x = int(bg_w * (x_pos / 100)) - (t_w // 2)
-    actual_y = int(bg_h * (y_pos / 100)) - (t_h // 2)
+    actual_x = (
+        int(bg_w * (x_pos / 100))
+        - (t_w // 2)
+    )
+
+    actual_y = (
+        int(bg_h * (y_pos / 100))
+        - (t_h // 2)
+    )
 
     # -----------------------------
-    # Overlay
+    # overlay
     # -----------------------------
 
     overlay = Image.new(
@@ -218,17 +235,24 @@ def apply_tattoo_to_skin(
         tattoo
     )
 
-    # realistic blending
-    combined = Image.alpha_composite(
+    # -----------------------------
+    # realistic blend
+    # -----------------------------
+
+    combined = Image.blend(
         bg,
-        overlay
+        overlay,
+        alpha=0.38
+    )
+
+    combined = combined.filter(
+        ImageFilter.GaussianBlur(0.15)
     )
 
     return combined.convert("RGB")
 
-
 # ==============================
-# Pollinations API
+# POLLINATIONS API
 # ==============================
 
 def call_sdxl_text2img(
@@ -236,10 +260,10 @@ def call_sdxl_text2img(
     aspect_label: str,
     model_label: str,
 ):
+
     full_prompt = (
-        f"{user_prompt}, {TATTOO_STYLE_PROMPT}"
-        if user_prompt
-        else TATTOO_STYLE_PROMPT
+        f"{user_prompt}, "
+        f"{TATTOO_STYLE_PROMPT}"
     )
 
     width, height = ASPECT_RATIOS.get(
@@ -273,6 +297,7 @@ def call_sdxl_text2img(
     )
 
     if resp.status_code != 200:
+
         raise RuntimeError(
             f"Pollinations error "
             f"{resp.status_code}: "
@@ -285,6 +310,7 @@ def call_sdxl_text2img(
     )
 
     if "image" not in content_type.lower():
+
         raise RuntimeError(
             f"Pollinations returned "
             f"non-image response: "
@@ -295,9 +321,8 @@ def call_sdxl_text2img(
         BytesIO(resp.content)
     ).convert("RGB")
 
-
 # ==============================
-# Main Generation Function
+# MAIN GENERATION
 # ==============================
 
 def generate_tattoo(
@@ -314,6 +339,7 @@ def generate_tattoo(
     rotation,
     opacity,
 ):
+
     if not prompt or not prompt.strip():
         return None
 
@@ -327,9 +353,13 @@ def generate_tattoo(
 
     enhanced_prompt = (
         f"{prompt.strip()}, "
-        f"{tattoo_type} tattoo, "
-        f"placement on {body_area}, "
-        f"clean stencil reference"
+        f"{tattoo_type} tattoo design, "
+        f"isolated tattoo, "
+        f"black ink only, "
+        f"pure white background, "
+        f"no body, no skin, no human, "
+        f"professional tattoo stencil, "
+        f"centered design"
     )
 
     try:
@@ -353,6 +383,7 @@ def generate_tattoo(
             )
 
         else:
+
             final_img = tattoo_design
 
         if not is_pro:
@@ -380,12 +411,13 @@ def generate_tattoo(
             f"Generation failed: {err}"
         )
 
-
 # ==============================
 # UI
 # ==============================
 
-with gr.Blocks(title="TattooDesigner") as demo:
+with gr.Blocks(
+    title="TattooDesigner"
+) as demo:
 
     gr.Markdown(
         """
@@ -402,8 +434,7 @@ Generate realistic tattoo previews directly on body photos.
             user_prompt = gr.Textbox(
                 label="Describe the tattoo",
                 placeholder=(
-                    "e.g. dragon fine line tattoo "
-                    "for neck"
+                    "e.g. dragon fine line tattoo"
                 ),
                 lines=3,
             )
@@ -413,7 +444,9 @@ Generate realistic tattoo previews directly on body photos.
                 type="filepath",
             )
 
-            gr.Markdown("### Placement")
+            gr.Markdown(
+                "### Placement"
+            )
 
             x_pos = gr.Slider(
                 0,
@@ -446,7 +479,7 @@ Generate realistic tattoo previews directly on body photos.
             opacity = gr.Slider(
                 50,
                 255,
-                value=180,
+                value=140,
                 label="Tattoo Opacity",
             )
 
@@ -464,13 +497,17 @@ Generate realistic tattoo previews directly on body photos.
 
             model_choice = gr.Dropdown(
                 label="Model",
-                choices=list(MODEL_ENDPOINTS.keys()),
+                choices=list(
+                    MODEL_ENDPOINTS.keys()
+                ),
                 value="Flux",
             )
 
             aspect = gr.Dropdown(
                 label="Aspect Ratio",
-                choices=list(ASPECT_RATIOS.keys()),
+                choices=list(
+                    ASPECT_RATIOS.keys()
+                ),
                 value="Vertical 2:3 (arm)",
             )
 
@@ -525,10 +562,3 @@ if __name__ == "__main__":
         server_name="0.0.0.0",
         server_port=port
     )
-
-
-
-
-
-
-
