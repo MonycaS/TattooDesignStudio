@@ -208,11 +208,11 @@ def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
 
     # Dark pixels -> visible alpha (preserves filled/continuous forms)
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 70 else min(255, int((p - 70) * 1.9)))
+    alpha = inv.point(lambda p: 0 if p < 52 else min(255, int((p - 52) * 1.7)))
 
     # Morphological cleanup (connect broken lines, remove dust)
     alpha = alpha.filter(ImageFilter.MaxFilter(3))
-    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    
 
     # Remove background chunks touching borders
     alpha = _remove_border_connected(alpha, threshold=12)
@@ -341,7 +341,7 @@ def apply_tattoo_realistic(
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
     # Drop weak pixels
-    final_alpha = final_alpha.point(lambda p: 0 if p < 28 else p)
+    final_alpha = final_alpha.point(lambda p: 0 if p < 22 else p)
 
     # Strength control
     alpha_gain = 0.35 + (realism_strength / 100.0) * 0.45
