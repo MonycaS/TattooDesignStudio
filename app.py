@@ -51,7 +51,7 @@ MODEL_ENDPOINTS = {
 TATTOO_STYLE_PROMPT = (
     "isolated tattoo design, "
     "pure white background, "
-    "black ink only, "
+    "black ink tattoo, "
     "professional tattoo stencil, "
     "centered composition, "
     "no human, no body, no skin"
@@ -136,7 +136,7 @@ def apply_tattoo_to_skin(
     y_pos,
     scale,
     rotation=0,
-    opacity=90,
+    opacity=110,
 ):
 
     bg = Image.open(
@@ -145,23 +145,38 @@ def apply_tattoo_to_skin(
 
     bg_w, bg_h = bg.size
 
-    # -----------------------------
-    # tattoo image
-    # -----------------------------
+    # ==============================
+    # CLEAN TATTOO
+    # ==============================
 
-    tattoo = tattoo_img.convert("RGBA")
+    # grayscale
+    tattoo = tattoo_img.convert("L")
+
+    # strong threshold
+    tattoo = tattoo.point(
+        lambda p: 0 if p < 180 else 255
+    )
+
+    # back to RGBA
+    tattoo = tattoo.convert("RGBA")
 
     arr = np.array(tattoo)
 
     r, g, b, a = arr.T
 
-    # remove white background
+    # remove white
     white_mask = (
         (r > 240) &
         (g > 240) &
         (b > 240)
     )
 
+    # pure black ink
+    arr[..., 0] = 0
+    arr[..., 1] = 0
+    arr[..., 2] = 0
+
+    # transparency
     arr[..., 3] = np.where(
         white_mask,
         0,
@@ -170,14 +185,14 @@ def apply_tattoo_to_skin(
 
     tattoo = Image.fromarray(arr)
 
-    # softer edges
+    # soften edges slightly
     tattoo = tattoo.filter(
-        ImageFilter.GaussianBlur(0.2)
+        ImageFilter.GaussianBlur(0.15)
     )
 
-    # -----------------------------
-    # resize
-    # -----------------------------
+    # ==============================
+    # RESIZE
+    # ==============================
 
     t_w = int(
         bg_w * (scale / 100)
@@ -194,9 +209,9 @@ def apply_tattoo_to_skin(
         Image.Resampling.LANCZOS
     )
 
-    # -----------------------------
-    # rotation
-    # -----------------------------
+    # ==============================
+    # ROTATE
+    # ==============================
 
     tattoo = tattoo.rotate(
         rotation,
@@ -205,9 +220,9 @@ def apply_tattoo_to_skin(
 
     t_w, t_h = tattoo.size
 
-    # -----------------------------
-    # position
-    # -----------------------------
+    # ==============================
+    # POSITION
+    # ==============================
 
     actual_x = (
         int(bg_w * (x_pos / 100))
@@ -219,9 +234,9 @@ def apply_tattoo_to_skin(
         - (t_h // 2)
     )
 
-    # -----------------------------
-    # tattoo layer
-    # -----------------------------
+    # ==============================
+    # TATTOO LAYER
+    # ==============================
 
     tattoo_layer = Image.new(
         "RGBA",
@@ -235,9 +250,9 @@ def apply_tattoo_to_skin(
         tattoo
     )
 
-    # -----------------------------
-    # realistic composite
-    # -----------------------------
+    # ==============================
+    # COMPOSITE
+    # ==============================
 
     combined = Image.alpha_composite(
         bg,
@@ -474,7 +489,7 @@ Generate realistic tattoo previews directly on body photos.
             opacity = gr.Slider(
                 30,
                 255,
-                value=90,
+                value=110,
                 label="Tattoo Opacity",
             )
 
