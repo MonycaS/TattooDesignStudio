@@ -122,7 +122,7 @@ def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
             r, g, b = src[x, y]
             dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
 
-    # curatare fara "scurgeri" pe fundal
+    # Cleanup without leaking to background
     mask = mask.filter(ImageFilter.MinFilter(3))
     mask = mask.filter(ImageFilter.MaxFilter(5))
     mask = mask.point(lambda p: 255 if p >= 128 else 0)
@@ -234,7 +234,7 @@ def make_radial_falloff_mask(size, softness=0.25):
 
 def warp_cylindrical(alpha: Image.Image, strength=0.12) -> Image.Image:
     """
-    Simuleaza curbura pielii prin compresie pe margini.
+    Simulates skin curvature by compressing side edges.
     strength: 0..0.4
     """
     strength = max(0.0, min(0.4, strength))
@@ -260,14 +260,13 @@ def warp_cylindrical(alpha: Image.Image, strength=0.12) -> Image.Image:
 
 def extract_texture_overlay(roi_bg: Image.Image, amount=0.16):
     """
-    Transfer subtil de textura din piele peste tatuaj.
+    Subtle skin texture transfer on top of tattoo region.
     """
     amount = max(0.0, min(0.5, amount))
     gray = ImageOps.grayscale(roi_bg)
     blur = gray.filter(ImageFilter.GaussianBlur(2.0))
-    detail = ImageChops.subtract(gray, blur, scale=1.0, offset=128)  # high-pass style
+    detail = ImageChops.subtract(gray, blur, scale=1.0, offset=128)
     detail_rgb = Image.merge("RGB", (detail, detail, detail))
-    # normalize around 128 then blend lightly
     base = Image.new("RGB", roi_bg.size, (128, 128, 128))
     mixed = Image.blend(base, detail_rgb, amount)
     return mixed
@@ -290,20 +289,20 @@ def apply_tattoo_realistic(
     skin_mask_full = build_skin_mask(bg_rgb)
     tattoo_alpha = prepare_tattoo_alpha(tattoo_img)
 
-    # size
+    # Size
     t_w = max(1, int(bg_w * (scale / 100)))
     ratio = t_w / float(tattoo_alpha.size[0])
     t_h = max(1, int(tattoo_alpha.size[1] * ratio))
     tattoo_alpha = tattoo_alpha.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
-    # curvature warp (important for "inkhunter-like" look)
+    # Curvature warp
     tattoo_alpha = warp_cylindrical(tattoo_alpha, strength=curvature_strength)
 
-    # edge soften minimal
+    # Minimal edge softening
     if edge_blur > 0:
         tattoo_alpha = tattoo_alpha.filter(ImageFilter.GaussianBlur(edge_blur))
 
-    # placement
+    # Placement
     center_x = int(bg_w * (x_pos / 100))
     center_y = int(bg_h * (y_pos / 100))
     center_x, center_y = snap_to_skin(bg_rgb, center_x, center_y)
@@ -319,44 +318,44 @@ def apply_tattoo_realistic(
         max_strength = 255 * (t_w * t_h)
         coverage = (skin_strength / max_strength) if max_strength else 0.0
         if coverage < 0.10:
-            raise gr.Error("Nu detectez suficienta piele in zona selectata. Muta pozitia sau schimba poza.")
+            raise gr.Error("Not enough skin detected in the selected area. Move sliders or use a clearer photo.")
 
-    # hard clip on skin
+    # Hard clip to skin
     roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
-    # remove weak spill
+    # Remove weak spill pixels
     final_alpha = final_alpha.point(lambda p: 0 if p < 35 else p)
 
-    # adaptive realism
+    # Adaptive realism
     alpha_gain = 0.22 + (realism_strength / 100.0) * 0.62
     final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
 
-    # edge attenuation (subtle)
+    # Edge attenuation
     falloff = make_radial_falloff_mask((t_w, t_h), softness=0.30)
     falloff = falloff.filter(ImageFilter.GaussianBlur(1.2))
     final_alpha = ImageChops.multiply(final_alpha, falloff)
 
     roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
 
-    # preserve highlights: reduce alpha in bright skin areas
+    # Preserve highlights
     lum = ImageOps.grayscale(roi_bg)
     highlight_suppress = lum.point(lambda p: int(255 - max(0, p - 175) * 1.6))
     final_alpha = ImageChops.multiply(final_alpha, highlight_suppress)
 
-    # tattoo tone
-    dark = int(max(0, min(65, 65 - int(ink_darkness))))  # bigger ink_darkness -> darker
+    # Tattoo tone
+    dark = int(max(0, min(65, 65 - int(ink_darkness))))
     tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
 
-    # multiply blend
+    # Multiply blend
     multiplied = ImageChops.multiply(roi_bg, tattoo_tone)
     roi_out = Image.composite(multiplied, roi_bg, final_alpha)
 
-    # texture transfer
+    # Texture transfer
     tex = extract_texture_overlay(roi_bg, amount=0.14)
     roi_out = ImageChops.multiply(roi_out, tex)
 
-    # tiny grain to avoid sticker look
+    # Subtle grain
     if realism_strength > 35:
         noise = Image.effect_noise((t_w, t_h), sigma=4).convert("L")
         noise = noise.point(lambda p: int(120 + (p - 128) * 0.35))
@@ -417,7 +416,7 @@ def generate_tattoo(
     strict_skin_mode,
 ):
     if not prompt or not prompt.strip():
-        raise gr.Error("Te rog scrie un prompt.")
+        raise gr.Error("Please enter a prompt.")
 
     is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
     if not is_pro:
@@ -435,7 +434,7 @@ def generate_tattoo(
     if body_photo_path:
         rx, ry = resolve_position(body_area, leg_placement, x_pos, y_pos)
         final_img = apply_tattoo_realistic(
-            body_photo_path=body_photo_path,
+            background_path=body_photo_path,  # FIXED: correct keyword
             tattoo_img=tattoo_design,
             x_pos=rx,
             y_pos=ry,
@@ -463,9 +462,9 @@ with gr.Blocks(title="TattooDesigner Pro-Look") as demo:
         """
 # TattooDesigner Pro-Look
 
-Aplicatie Gradio cu aplicare tatuaj mai realista (skin-aware + curvature + lighting + texture transfer).
+Gradio app with more realistic tattoo compositing (skin-aware + curvature + lighting + texture transfer).
 
-**Prompt recomandat (exemplu):**  
+**Recommended prompt example:**  
 `single rose flower, black fine line tattoo stencil, clean contours, centered, no shading`
 """
     )
@@ -473,12 +472,12 @@ Aplicatie Gradio cu aplicare tatuaj mai realista (skin-aware + curvature + light
     with gr.Row():
         with gr.Column():
             user_prompt = gr.Textbox(
-                label="Descrie tatuajul (EN)",
+                label="Describe the tattoo (EN)",
                 placeholder="e.g. single rose flower, black fine line tattoo stencil",
                 lines=3,
             )
             body_photo = gr.Image(
-                label="Upload poza zona corp",
+                label="Upload body area photo",
                 type="filepath",
             )
 
@@ -487,19 +486,19 @@ Aplicatie Gradio cu aplicare tatuaj mai realista (skin-aware + curvature + light
             tattoo_type = gr.Dropdown(label="Tattoo type", choices=TATTOO_TYPES, value="fine line")
             model_choice = gr.Dropdown(label="Model", choices=list(MODEL_ENDPOINTS.keys()), value="Flux")
             aspect = gr.Dropdown(
-                label="Aspect Ratio (PRO only; Free forced to Square)",
+                label="Aspect Ratio (PRO only; Free is forced to Square)",
                 choices=list(ASPECT_RATIOS.keys()),
                 value="Vertical 2:3 (arm)",
             )
 
             with gr.Group():
-                gr.Markdown("### Pozitie / marime")
+                gr.Markdown("### Position / Size")
                 x_pos = gr.Slider(0, 100, value=DEFAULT_X, label="Horizontal Position (%)")
                 y_pos = gr.Slider(0, 100, value=DEFAULT_Y, label="Vertical Position (%)")
                 scale = gr.Slider(5, 100, value=28, label="Tattoo Size (%)")
 
             with gr.Group():
-                gr.Markdown("### Realism controls")
+                gr.Markdown("### Realism Controls")
                 realism_strength = gr.Slider(0, 100, value=72, label="Realism strength")
                 ink_darkness = gr.Slider(0, 100, value=80, label="Ink darkness")
                 edge_blur = gr.Slider(0.0, 2.0, value=0.1, step=0.1, label="Edge blur")
@@ -507,7 +506,7 @@ Aplicatie Gradio cu aplicare tatuaj mai realista (skin-aware + curvature + light
                 strict_skin_mode = gr.Checkbox(value=STRICT_SKIN_DEFAULT, label="Strict skin mode")
 
             license_key = gr.Textbox(
-                label="License key PRO (Gumroad)",
+                label="PRO license key (Gumroad)",
                 placeholder="Paste your Gumroad key",
                 type="password",
             )
@@ -515,7 +514,7 @@ Aplicatie Gradio cu aplicare tatuaj mai realista (skin-aware + curvature + light
             btn = gr.Button("Generate & Apply", variant="primary")
 
         with gr.Column():
-            output_image = gr.Image(label="Rezultat", type="pil")
+            output_image = gr.Image(label="Result", type="pil")
 
     btn.click(
         fn=generate_tattoo,
