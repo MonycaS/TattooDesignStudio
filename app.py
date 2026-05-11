@@ -20,7 +20,7 @@ gc_utils._json_schema_to_python_type = _patched__json_schema_to_python_type
 # --- END PATCH ---
 
 # ==============================
-# Config
+# Configuration
 # ==============================
 POLLINATIONS_BASE_URL = "https://image.pollinations.ai/prompt"
 
@@ -59,8 +59,6 @@ LEG_PLACEMENT_Y = {
     "upper": 36,
 }
 
-STRICT_SKIN_DEFAULT = False
-
 VALID_KEYS = {
     "ABC-123",
     "DEF-456",
@@ -70,11 +68,11 @@ VALID_KEYS = {
 TATTOO_STYLE_PROMPT = (
     "tattoo flash, clean stencil, centered, high contrast, white background, black ink linework, "
     "recognizable single subject, isolated, no background elements, no extra symbols, "
-    "no watercolor, no splatter, no abstract texture, no gray wash, no 3d"
+    "no watercolor, no splatter, no abstract texture, no gray wash, no 3d render"
 )
 
 # ==============================
-# Helpers
+# Utility Functions
 # ==============================
 def add_watermark(img: Image.Image) -> Image.Image:
     img = img.copy()
@@ -100,75 +98,75 @@ def resolve_position(body_area, leg_placement, x_pos, y_pos):
 
     return x_pos, y_pos
 
-def _is_skin_pixel(r, g, b):
-    mx = max(r, g, b)
-    mn = min(r, g, b)
-    return (
-        r > 85 and g > 35 and b > 20 and
-        (mx - mn) > 12 and
-        abs(r - g) > 10 and
-        r > g and r > b
-    )
+def _largest_component_mask(alpha: Image.Image, thr: int = 20) -> Image.Image:
+    """
+    Keep only the largest non-border connected component from an alpha mask.
+    This removes big rectangular artifacts from generated tattoo images.
+    """
+    a = alpha.convert("L")
+    w, h = a.size
+    px = a.load()
 
-def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
-    w, h = rgb_img.size
-    src = rgb_img.load()
-    mask = Image.new("L", (w, h), 0)
-    dst = mask.load()
+    visited = [[False] * h for _ in range(w)]
 
-    for y in range(h):
-        for x in range(w):
-            r, g, b = src[x, y]
-            dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
+    def flood(sx, sy):
+        stack = [(sx, sy)]
+        comp = []
+        touches_border = False
+        while stack:
+            x, y = stack.pop()
+            if x < 0 or x >= w or y < 0 or y >= h:
+                continue
+            if visited[x][y]:
+                continue
+            visited[x][y] = True
+            if px[x, y] <= thr:
+                continue
+            comp.append((x, y))
+            if x == 0 or y == 0 or x == w - 1 or y == h - 1:
+                touches_border = True
+            stack.append((x + 1, y))
+            stack.append((x - 1, y))
+            stack.append((x, y + 1))
+            stack.append((x, y - 1))
+        return comp, touches_border
 
-    mask = mask.filter(ImageFilter.MinFilter(3))
-    mask = mask.filter(ImageFilter.MaxFilter(5))
-    mask = mask.point(lambda p: 255 if p >= 128 else 0)
-    return mask
+    best = []
+    for yy in range(h):
+        for xx in range(w):
+            if not visited[xx][yy] and px[xx, yy] > thr:
+                comp, border = flood(xx, yy)
+                if border:
+                    continue
+                if len(comp) > len(best):
+                    best = comp
 
-def snap_to_skin(rgb_img: Image.Image, x, y, max_radius=220, step=2):
-    w, h = rgb_img.size
-    x = max(0, min(x, w - 1))
-    y = max(0, min(y, h - 1))
-    px = rgb_img.load()
+    out = Image.new("L", (w, h), 0)
+    opx = out.load()
+    for xx, yy in best:
+        opx[xx, yy] = 255
 
-    r, g, b = px[x, y]
-    if _is_skin_pixel(r, g, b):
-        return x, y
+    # Fallback: if nothing found, keep original threshold mask
+    if out.getbbox() is None:
+        out = a.point(lambda p: 255 if p > thr else 0)
 
-    for radius in range(step, max_radius + 1, step):
-        left = max(0, x - radius)
-        right = min(w - 1, x + radius)
-        top = max(0, y - radius)
-        bottom = min(h - 1, y + radius)
-
-        for xx in range(left, right + 1, step):
-            for yy in (top, bottom):
-                rr, gg, bb = px[xx, yy]
-                if _is_skin_pixel(rr, gg, bb):
-                    return xx, yy
-
-        for yy in range(top, bottom + 1, step):
-            for xx in (left, right):
-                rr, gg, bb = px[xx, yy]
-                if _is_skin_pixel(rr, gg, bb):
-                    return xx, yy
-
-    return x, y
+    return out
 
 def prepare_tattoo_rgba(tattoo_img: Image.Image) -> Image.Image:
     """
-    Simple, robust conversion:
-    - remove near-white background
-    - keep dark content
+    Convert generated tattoo image to a clean RGBA tattoo layer.
     """
     rgb = tattoo_img.convert("RGB")
     gray = ImageOps.grayscale(rgb)
-    inv = ImageOps.invert(gray)
+    gray = ImageOps.autocontrast(gray, cutoff=1)
 
-    # Soft threshold so it doesn't disappear
-    alpha = inv.point(lambda p: 0 if p < 20 else min(255, int(p * 1.2)))
+    inv = ImageOps.invert(gray)
+    alpha = inv.point(lambda p: 0 if p < 28 else min(255, int((p - 28) * 1.4)))
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
+
+    # Keep only the main tattoo shape
+    alpha = _largest_component_mask(alpha, thr=20)
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
 
     ink = Image.new("RGBA", rgb.size, (10, 10, 10, 0))
     ink.putalpha(alpha)
@@ -179,7 +177,7 @@ def prepare_tattoo_rgba(tattoo_img: Image.Image) -> Image.Image:
 
     return ink
 
-def call_text2img(user_prompt: str, aspect_label: str, model_label: str):
+def call_text2img(user_prompt: str, aspect_label: str, model_label: str) -> Image.Image:
     full_prompt = f"{user_prompt}, {TATTOO_STYLE_PROMPT}" if user_prompt else TATTOO_STYLE_PROMPT
     width, height = ASPECT_RATIOS.get(aspect_label, (1024, 1024))
     model_id = MODEL_ENDPOINTS.get(model_label, "flux")
@@ -198,6 +196,7 @@ def call_text2img(user_prompt: str, aspect_label: str, model_label: str):
         params=params,
         timeout=90,
     )
+
     if resp.status_code != 200:
         raise RuntimeError(f"Pollinations error {resp.status_code}: {resp.text[:400]}")
 
@@ -216,47 +215,45 @@ def apply_tattoo_stable(
     realism_strength,
     ink_darkness,
     edge_blur,
-    strict_skin_mode,
 ):
+    """
+    Stable tattoo compositing without black-rectangle artifacts.
+    """
     bg = Image.open(background_path).convert("RGBA")
-    bg_w, bg_h = bg.size
+    bw, bh = bg.size
 
-    tattoo_rgba = prepare_tattoo_rgba(tattoo_img)
+    tattoo = prepare_tattoo_rgba(tattoo_img)
 
-    # Resize
-    t_w = max(1, int(bg_w * (scale / 100)))
-    ratio = t_w / float(max(1, tattoo_rgba.size[0]))
-    t_h = max(1, int(tattoo_rgba.size[1] * ratio))
-    tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
+    tw = max(1, int(bw * (scale / 100)))
+    ratio = tw / max(1, tattoo.size[0])
+    th = max(1, int(tattoo.size[1] * ratio))
+    tattoo = tattoo.resize((tw, th), Image.Resampling.LANCZOS)
 
     if edge_blur > 0:
-        a = tattoo_rgba.getchannel("A").filter(ImageFilter.GaussianBlur(edge_blur))
-        tattoo_rgba.putalpha(a)
+        a = tattoo.getchannel("A").filter(ImageFilter.GaussianBlur(edge_blur))
+        tattoo.putalpha(a)
 
-    # Position
-    center_x = int(bg_w * (x_pos / 100))
-    center_y = int(bg_h * (y_pos / 100))
-    actual_x = max(0, min(center_x - t_w // 2, max(0, bg_w - t_w)))
-    actual_y = max(0, min(center_y - t_h // 2, max(0, bg_h - t_h)))
+    cx = int(bw * (x_pos / 100))
+    cy = int(bh * (y_pos / 100))
+    ax = max(0, min(cx - tw // 2, bw - tw))
+    ay = max(0, min(cy - th // 2, bh - th))
 
-    # Opacity from realism
-    alpha_gain = 0.45 + (realism_strength / 100.0) * 0.45
-    a = tattoo_rgba.getchannel("A").point(lambda p: int(max(0, min(255, p * alpha_gain))))
-    tattoo_rgba.putalpha(a)
+    gain = 0.55 + (realism_strength / 100.0) * 0.55
+    a = tattoo.getchannel("A").point(lambda p: int(max(0, min(255, p * gain))))
+    tattoo.putalpha(a)
 
-    # Darker ink from slider
-    dark = int(max(0, min(70, 70 - int(ink_darkness))))
-    ink_layer = Image.new("RGBA", tattoo_rgba.size, (dark, dark, dark, 0))
-    ink_layer.putalpha(tattoo_rgba.getchannel("A"))
+    dark = int(max(0, min(60, 60 - int(ink_darkness))))
+    tone = Image.new("RGBA", tattoo.size, (dark, dark, dark, 0))
+    tone.putalpha(tattoo.getchannel("A"))
 
-    # Composite
     layer = Image.new("RGBA", bg.size, (0, 0, 0, 0))
-    layer.paste(ink_layer, (actual_x, actual_y), ink_layer)
+    layer.paste(tone, (ax, ay), tone)
+
     out = Image.alpha_composite(bg, layer).convert("RGB")
     return out
 
 # ==============================
-# Main
+# Main Generation
 # ==============================
 def generate_tattoo(
     prompt,
@@ -273,7 +270,6 @@ def generate_tattoo(
     realism_strength,
     ink_darkness,
     edge_blur,
-    strict_skin_mode,
 ):
     if not prompt or not prompt.strip():
         raise gr.Error("Please enter a prompt.")
@@ -302,7 +298,6 @@ def generate_tattoo(
             realism_strength=realism_strength,
             ink_darkness=ink_darkness,
             edge_blur=edge_blur,
-            strict_skin_mode=strict_skin_mode,
         )
     else:
         final_img = tattoo_design
@@ -316,12 +311,12 @@ def generate_tattoo(
 # ==============================
 # UI
 # ==============================
-with gr.Blocks(title="TattooDesigner Stable Mode") as demo:
+with gr.Blocks(title="TattooDesigner Stable") as demo:
     gr.Markdown(
         """
-# TattooDesigner Stable Mode
+# TattooDesigner Stable
 
-This version prioritizes reliable visibility and complete tattoo shapes.
+Reliable tattoo generation and overlay with artifact-resistant masking.
 """
     )
 
@@ -358,7 +353,6 @@ This version prioritizes reliable visibility and complete tattoo shapes.
                 realism_strength = gr.Slider(0, 100, value=85, label="Realism strength")
                 ink_darkness = gr.Slider(0, 100, value=90, label="Ink darkness")
                 edge_blur = gr.Slider(0.0, 2.0, value=0.0, step=0.1, label="Edge blur")
-                strict_skin_mode = gr.Checkbox(value=STRICT_SKIN_DEFAULT, label="Strict skin mode")
 
             license_key = gr.Textbox(
                 label="PRO license key (Gumroad)",
@@ -388,7 +382,6 @@ This version prioritizes reliable visibility and complete tattoo shapes.
             realism_strength,
             ink_darkness,
             edge_blur,
-            strict_skin_mode,
         ],
         outputs=output_image,
     )
