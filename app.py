@@ -98,83 +98,45 @@ def resolve_position(body_area, leg_placement, x_pos, y_pos):
 
     return x_pos, y_pos
 
-def _largest_component_mask(alpha: Image.Image, thr: int = 20) -> Image.Image:
-    """
-    Keep only the largest non-border connected component from an alpha mask.
-    This removes big rectangular artifacts from generated tattoo images.
-    """
-    a = alpha.convert("L")
-    w, h = a.size
-    px = a.load()
-
-    visited = [[False] * h for _ in range(w)]
-
-    def flood(sx, sy):
-        stack = [(sx, sy)]
-        comp = []
-        touches_border = False
-        while stack:
-            x, y = stack.pop()
-            if x < 0 or x >= w or y < 0 or y >= h:
-                continue
-            if visited[x][y]:
-                continue
-            visited[x][y] = True
-            if px[x, y] <= thr:
-                continue
-            comp.append((x, y))
-            if x == 0 or y == 0 or x == w - 1 or y == h - 1:
-                touches_border = True
-            stack.append((x + 1, y))
-            stack.append((x - 1, y))
-            stack.append((x, y + 1))
-            stack.append((x, y - 1))
-        return comp, touches_border
-
-    best = []
-    for yy in range(h):
-        for xx in range(w):
-            if not visited[xx][yy] and px[xx, yy] > thr:
-                comp, border = flood(xx, yy)
-                if border:
-                    continue
-                if len(comp) > len(best):
-                    best = comp
-
-    out = Image.new("L", (w, h), 0)
-    opx = out.load()
-    for xx, yy in best:
-        opx[xx, yy] = 255
-
-    # Fallback: if nothing found, keep original threshold mask
-    if out.getbbox() is None:
-        out = a.point(lambda p: 255 if p > thr else 0)
-
-    return out
-
 def prepare_tattoo_rgba(tattoo_img: Image.Image) -> Image.Image:
     """
-    Convert generated tattoo image to a clean RGBA tattoo layer.
+    Clean line-art extraction for tattoo:
+    - removes white background
+    - preserves thin lines
+    - avoids solid black blobs
     """
     rgb = tattoo_img.convert("RGB")
     gray = ImageOps.grayscale(rgb)
     gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray = gray.filter(ImageFilter.MedianFilter(3))
 
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 28 else min(255, int((p - 28) * 1.4)))
-    alpha = alpha.filter(ImageFilter.MedianFilter(3))
 
-    # Keep only the main tattoo shape
-    alpha = _largest_component_mask(alpha, thr=20)
-    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
+    # Keep linework, reject low-contrast fill
+    alpha = inv.point(lambda p: 0 if p < 40 else min(255, int((p - 40) * 1.6)))
 
-    ink = Image.new("RGBA", rgb.size, (10, 10, 10, 0))
-    ink.putalpha(alpha)
+    # Remove heavy filled regions by intersecting with edges
+    edges = gray.filter(ImageFilter.FIND_EDGES)
+    edges = ImageOps.autocontrast(edges, cutoff=1)
+    edge_mask = edges.point(lambda p: 255 if p > 18 else 0)
 
-    bbox = ink.getbbox()
+    # Combine: keep only pixels supported by edge structure
+    alpha = ImageChops.multiply(alpha, edge_mask)
+
+    # Light thickening so thin lines survive
+    alpha = alpha.filter(ImageFilter.MaxFilter(3))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.5))
+
+    bbox = alpha.getbbox()
     if bbox:
-        ink = ink.crop(bbox)
+        alpha = alpha.crop(bbox)
+    else:
+        # fallback tiny visible mark instead of black block
+        alpha = Image.new("L", (12, 12), 0)
+        alpha.putpixel((6, 6), 255)
 
+    ink = Image.new("RGBA", alpha.size, (10, 10, 10, 0))
+    ink.putalpha(alpha)
     return ink
 
 def call_text2img(user_prompt: str, aspect_label: str, model_label: str) -> Image.Image:
@@ -217,7 +179,7 @@ def apply_tattoo_stable(
     edge_blur,
 ):
     """
-    Stable tattoo compositing without black-rectangle artifacts.
+    Stable overlay pipeline.
     """
     bg = Image.open(background_path).convert("RGBA")
     bw, bh = bg.size
@@ -238,8 +200,10 @@ def apply_tattoo_stable(
     ax = max(0, min(cx - tw // 2, bw - tw))
     ay = max(0, min(cy - th // 2, bh - th))
 
-    gain = 0.55 + (realism_strength / 100.0) * 0.55
+    gain = 0.50 + (realism_strength / 100.0) * 0.55
     a = tattoo.getchannel("A").point(lambda p: int(max(0, min(255, p * gain))))
+    # remove weak spill
+    a = a.point(lambda p: 0 if p < 20 else p)
     tattoo.putalpha(a)
 
     dark = int(max(0, min(60, 60 - int(ink_darkness))))
@@ -324,7 +288,7 @@ Reliable tattoo generation and overlay with artifact-resistant masking.
         with gr.Column():
             user_prompt = gr.Textbox(
                 label="Describe the tattoo (EN)",
-                placeholder="e.g. single rose flower, black fine line tattoo stencil",
+                placeholder="e.g. single spider tattoo stencil, thin black linework, no fill, no shading",
                 lines=3,
             )
             body_photo = gr.Image(
@@ -332,7 +296,7 @@ Reliable tattoo generation and overlay with artifact-resistant masking.
                 type="filepath",
             )
 
-            body_area = gr.Dropdown(label="Body area", choices=BODY_AREAS, value="leg")
+            body_area = gr.Dropdown(label="Body area", choices=BODY_AREAS, value="neck")
             leg_placement = gr.Dropdown(label="Leg placement", choices=LEG_PLACEMENTS, value="auto")
             tattoo_type = gr.Dropdown(label="Tattoo type", choices=TATTOO_TYPES, value="fine line")
             model_choice = gr.Dropdown(label="Model", choices=list(MODEL_ENDPOINTS.keys()), value="Flux")
@@ -350,8 +314,8 @@ Reliable tattoo generation and overlay with artifact-resistant masking.
 
             with gr.Group():
                 gr.Markdown("### Visibility Controls")
-                realism_strength = gr.Slider(0, 100, value=85, label="Realism strength")
-                ink_darkness = gr.Slider(0, 100, value=90, label="Ink darkness")
+                realism_strength = gr.Slider(0, 100, value=75, label="Realism strength")
+                ink_darkness = gr.Slider(0, 100, value=80, label="Ink darkness")
                 edge_blur = gr.Slider(0.0, 2.0, value=0.0, step=0.1, label="Edge blur")
 
             license_key = gr.Textbox(
