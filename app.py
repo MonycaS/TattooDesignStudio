@@ -156,29 +156,28 @@ def snap_to_skin(rgb_img: Image.Image, x, y, max_radius=220, step=2):
 
     return x, y
 
-def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
+def prepare_tattoo_rgba(tattoo_img: Image.Image) -> Image.Image:
     """
-    Robust alpha extraction that does NOT disappear easily.
+    Simple, robust conversion:
+    - remove near-white background
+    - keep dark content
     """
-    gray = ImageOps.grayscale(tattoo_img)
-    gray = ImageOps.autocontrast(gray, cutoff=0)
-
+    rgb = tattoo_img.convert("RGB")
+    gray = ImageOps.grayscale(rgb)
     inv = ImageOps.invert(gray)
 
-    # Softer threshold to keep more tattoo content
-    alpha = inv.point(lambda p: 0 if p < 24 else min(255, int((p - 24) * 1.25)))
-
-    # Very light cleanup only
+    # Soft threshold so it doesn't disappear
+    alpha = inv.point(lambda p: 0 if p < 20 else min(255, int(p * 1.2)))
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
 
-    bbox = alpha.getbbox()
-    if bbox:
-        alpha = alpha.crop(bbox)
-    else:
-        alpha = Image.new("L", (16, 16), 0)
-        alpha.putpixel((8, 8), 255)
+    ink = Image.new("RGBA", rgb.size, (10, 10, 10, 0))
+    ink.putalpha(alpha)
 
-    return alpha
+    bbox = ink.getbbox()
+    if bbox:
+        ink = ink.crop(bbox)
+
+    return ink
 
 def call_text2img(user_prompt: str, aspect_label: str, model_label: str):
     full_prompt = f"{user_prompt}, {TATTOO_STYLE_PROMPT}" if user_prompt else TATTOO_STYLE_PROMPT
@@ -219,58 +218,41 @@ def apply_tattoo_stable(
     edge_blur,
     strict_skin_mode,
 ):
-    bg_rgb = Image.open(background_path).convert("RGB")
-    bg_w, bg_h = bg_rgb.size
+    bg = Image.open(background_path).convert("RGBA")
+    bg_w, bg_h = bg.size
 
-    skin_mask_full = build_skin_mask(bg_rgb)
-    tattoo_alpha = prepare_tattoo_alpha(tattoo_img)
+    tattoo_rgba = prepare_tattoo_rgba(tattoo_img)
 
+    # Resize
     t_w = max(1, int(bg_w * (scale / 100)))
-    ratio = t_w / float(max(1, tattoo_alpha.size[0]))
-    t_h = max(1, int(tattoo_alpha.size[1] * ratio))
-    tattoo_alpha = tattoo_alpha.resize((t_w, t_h), Image.Resampling.LANCZOS)
+    ratio = t_w / float(max(1, tattoo_rgba.size[0]))
+    t_h = max(1, int(tattoo_rgba.size[1] * ratio))
+    tattoo_rgba = tattoo_rgba.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
     if edge_blur > 0:
-        tattoo_alpha = tattoo_alpha.filter(ImageFilter.GaussianBlur(edge_blur))
+        a = tattoo_rgba.getchannel("A").filter(ImageFilter.GaussianBlur(edge_blur))
+        tattoo_rgba.putalpha(a)
 
+    # Position
     center_x = int(bg_w * (x_pos / 100))
     center_y = int(bg_h * (y_pos / 100))
-    center_x, center_y = snap_to_skin(bg_rgb, center_x, center_y)
-
     actual_x = max(0, min(center_x - t_w // 2, max(0, bg_w - t_w)))
     actual_y = max(0, min(center_y - t_h // 2, max(0, bg_h - t_h)))
 
-    roi_skin = skin_mask_full.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
-    roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
+    # Opacity from realism
+    alpha_gain = 0.45 + (realism_strength / 100.0) * 0.45
+    a = tattoo_rgba.getchannel("A").point(lambda p: int(max(0, min(255, p * alpha_gain))))
+    tattoo_rgba.putalpha(a)
 
-    if strict_skin_mode:
-        hist = roi_skin_hard.histogram()
-        skin_pixels = hist[255]
-        coverage = skin_pixels / float(t_w * t_h)
-        if coverage < 0.10:
-            raise gr.Error("Not enough skin detected in selected area.")
+    # Darker ink from slider
+    dark = int(max(0, min(70, 70 - int(ink_darkness))))
+    ink_layer = Image.new("RGBA", tattoo_rgba.size, (dark, dark, dark, 0))
+    ink_layer.putalpha(tattoo_rgba.getchannel("A"))
 
-    final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
-
-    # Fallback if skin mask wipes everything
-    if final_alpha.getbbox() is None:
-        final_alpha = tattoo_alpha.copy()
-
-    # Keep weak details
-    final_alpha = final_alpha.point(lambda p: 0 if p < 6 else p)
-
-    alpha_gain = 0.55 + (realism_strength / 100.0) * 0.55
-    final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
-
-    roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
-    dark = int(max(0, min(60, 60 - int(ink_darkness))))
-    tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
-
-    multiplied = ImageChops.multiply(roi_bg, tattoo_tone)
-    roi_out = Image.composite(multiplied, roi_bg, final_alpha)
-
-    out = bg_rgb.copy()
-    out.paste(roi_out, (actual_x, actual_y))
+    # Composite
+    layer = Image.new("RGBA", bg.size, (0, 0, 0, 0))
+    layer.paste(ink_layer, (actual_x, actual_y), ink_layer)
+    out = Image.alpha_composite(bg, layer).convert("RGB")
     return out
 
 # ==============================
