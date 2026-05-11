@@ -2,7 +2,7 @@ Pillow
 requests
 gradio
 gradio_client
-replicate
+numpy
 
 
 
