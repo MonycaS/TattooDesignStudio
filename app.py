@@ -67,7 +67,8 @@ VALID_KEYS = {
 
 TATTOO_STYLE_PROMPT = (
     "tattoo flash, clean stencil, centered, high contrast, white background, black ink linework, "
-    "recognizable subject, no watercolor, no splatter, no abstract texture, no gray wash, no 3d"
+    "recognizable single subject, isolated, no background elements, no extra symbols, "
+    "no watercolor, no splatter, no abstract texture, no gray wash, no 3d"
 )
 
 # ==============================
@@ -86,14 +87,14 @@ def add_watermark(img: Image.Image) -> Image.Image:
     return img
 
 def resolve_position(body_area, leg_placement, x_pos, y_pos):
-    # daca user lasa slider-ele la default, folosim auto placement
+    # auto placement only if sliders remain default
     if int(x_pos) == DEFAULT_X and int(y_pos) == DEFAULT_Y:
         ax, ay = AUTO_PLACEMENT.get(body_area, (x_pos, y_pos))
         if body_area == "leg" and LEG_PLACEMENT_Y.get(leg_placement) is not None:
             ay = LEG_PLACEMENT_Y[leg_placement]
         return ax, ay
 
-    # daca user a setat manual, dar a ales leg preset, aplicam doar y preset
+    # if user set manual x but uses leg preset, force only y preset
     if body_area == "leg" and LEG_PLACEMENT_Y.get(leg_placement) is not None:
         return x_pos, LEG_PLACEMENT_Y[leg_placement]
 
@@ -112,9 +113,8 @@ def _is_skin_pixel(r, g, b):
 def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
     """
     Hard skin mask:
-    - 255 doar pe piele
-    - 0 in rest
-    - curatare zgomot fara blur mare
+    - 255 on skin
+    - 0 elsewhere
     """
     w, h = rgb_img.size
     src = rgb_img.load()
@@ -126,11 +126,9 @@ def build_skin_mask(rgb_img: Image.Image) -> Image.Image:
             r, g, b = src[x, y]
             dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
 
-    # curatare zgomot, fara scurgeri spre fundal
+    # clean tiny noise, keep hard edges
     mask = mask.filter(ImageFilter.MinFilter(3))
     mask = mask.filter(ImageFilter.MaxFilter(5))
-
-    # threshold hard
     mask = mask.point(lambda p: 255 if p >= 128 else 0)
     return mask
 
@@ -164,15 +162,70 @@ def snap_to_skin(rgb_img: Image.Image, x, y, max_radius=220, step=2):
 
     return x, y
 
+def _remove_border_connected(alpha: Image.Image, threshold: int = 10) -> Image.Image:
+    """
+    Remove components connected to image border.
+    This kills rectangular/edge artifacts from generated tattoo image.
+    """
+    alpha = alpha.copy().convert("L")
+    w, h = alpha.size
+    px = alpha.load()
+
+    visited = [[False] * h for _ in range(w)]
+    stack = []
+
+    for x in range(w):
+        if px[x, 0] > threshold:
+            stack.append((x, 0))
+        if px[x, h - 1] > threshold:
+            stack.append((x, h - 1))
+    for y in range(h):
+        if px[0, y] > threshold:
+            stack.append((0, y))
+        if px[w - 1, y] > threshold:
+            stack.append((w - 1, y))
+
+    while stack:
+        x, y = stack.pop()
+        if x < 0 or x >= w or y < 0 or y >= h:
+            continue
+        if visited[x][y]:
+            continue
+        visited[x][y] = True
+
+        if px[x, y] <= threshold:
+            continue
+
+        px[x, y] = 0
+
+        stack.append((x + 1, y))
+        stack.append((x - 1, y))
+        stack.append((x, y + 1))
+        stack.append((x, y - 1))
+
+    return alpha
+
 def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
-    # masca robusta: scoate fundal alb/gri si pastreaza liniile
+    """
+    Build robust tattoo alpha:
+    - keep only dark linework
+    - remove border-connected blobs/artifacts
+    """
     gray = ImageOps.grayscale(tattoo_img)
     gray = ImageOps.autocontrast(gray, cutoff=1)
     gray = gray.filter(ImageFilter.MedianFilter(3))
 
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 55 else min(255, int((p - 55) * 1.7)))
-    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
+
+    # hard extraction of darker lines
+    alpha = inv.point(lambda p: 255 if p > 135 else 0)
+
+    # clean noise
+    alpha = alpha.filter(ImageFilter.MinFilter(3))
+    alpha = alpha.filter(ImageFilter.MaxFilter(3))
+
+    # remove artifact components touching edges
+    alpha = _remove_border_connected(alpha, threshold=10)
 
     bbox = alpha.getbbox()
     if bbox:
@@ -225,12 +278,13 @@ def apply_tattoo_realistic(
     skin_mask_full = build_skin_mask(bg_rgb)
     tattoo_alpha = prepare_tattoo_alpha(tattoo_img)
 
-    # scale tatuaj relativ la latimea pozei
+    # tattoo scale relative to image width
     t_w = max(1, int(bg_w * (scale / 100)))
     ratio = t_w / float(tattoo_alpha.size[0])
     t_h = max(1, int(tattoo_alpha.size[1] * ratio))
     tattoo_alpha = tattoo_alpha.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
+    # keep blur minimal to avoid spill
     if edge_blur > 0:
         tattoo_alpha = tattoo_alpha.filter(ImageFilter.GaussianBlur(edge_blur))
 
@@ -251,24 +305,24 @@ def apply_tattoo_realistic(
         if coverage < 0.10:
             raise gr.Error("Nu detectez suficienta piele in zona selectata. Muta pozitia sau schimba poza.")
 
-    # HARD clip pe piele: daca nu e piele => alpha 0
+    # hard clip to skin only
     roi_skin_hard = roi_skin.point(lambda p: 255 if p >= 128 else 0)
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
-    # scoate pixelii slabi care arata ca "umbre"
+    # remove weak spill pixels
     final_alpha = final_alpha.point(lambda p: 0 if p < 35 else p)
 
-    # realism strength 0..100 => 0.25..0.85
+    # realism strength 0..100 => alpha gain 0.25..0.85
     alpha_gain = 0.25 + (realism_strength / 100.0) * 0.60
     final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
 
     roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
 
-    # tatuaj culoare aproape neagra, dar reglabila
+    # dark tattoo tone (lower = darker)
     dark = int(max(0, min(60, 60 - int(ink_darkness))))
     tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
 
-    # Multiply blend pentru efect "sub piele"
+    # multiply blend = "under skin" look
     multiplied = ImageChops.multiply(roi_bg, tattoo_tone)
     roi_out = Image.composite(multiplied, roi_bg, final_alpha)
 
@@ -306,8 +360,9 @@ def generate_tattoo(
 
     enhanced_prompt = (
         f"{prompt.strip()}, {tattoo_type} tattoo, {body_area} placement, "
-        "subject clearly recognizable, black fine line tattoo stencil, "
-        "clean contours, minimal composition, no abstract marks, no splatter, no shading"
+        "subject clearly recognizable, black fine line tattoo stencil, clean contours, "
+        "minimal composition, single subject only, isolated, "
+        "no abstract marks, no splatter, no shading, no extra symbols"
     )
 
     tattoo_design = call_text2img(enhanced_prompt, aspect_label, model_label)
@@ -342,9 +397,9 @@ with gr.Blocks(title="TattooDesigner Pro-Look") as demo:
         """
 # TattooDesigner Pro-Look
 
-Genereaza design + il aplica realist pe piele (skin-aware, multiply blend, hard skin clipping).
+Genereaza design + aplicare realistă pe piele (skin-aware, multiply blend, hard clipping).
 
-**Tip prompt bun:**  
+**Prompt recomandat:**  
 `single rose flower, black fine line tattoo stencil, clean contours, centered, no shading`
 """
     )
@@ -381,7 +436,7 @@ Genereaza design + il aplica realist pe piele (skin-aware, multiply blend, hard 
                 gr.Markdown("### Realism controls")
                 realism_strength = gr.Slider(0, 100, value=68, label="Realism strength")
                 ink_darkness = gr.Slider(0, 100, value=78, label="Ink darkness")
-                edge_blur = gr.Slider(0.0, 2.0, value=0.2, step=0.1, label="Edge blur")
+                edge_blur = gr.Slider(0.0, 2.0, value=0.0, step=0.1, label="Edge blur")
                 strict_skin_mode = gr.Checkbox(value=STRICT_SKIN_DEFAULT, label="Strict skin mode")
 
             license_key = gr.Textbox(
