@@ -59,7 +59,7 @@ LEG_PLACEMENT_Y = {
     "upper": 36,
 }
 
-STRICT_SKIN_DEFAULT = True
+STRICT_SKIN_DEFAULT = False
 
 VALID_KEYS = {
     "ABC-123",
@@ -156,57 +156,20 @@ def snap_to_skin(rgb_img: Image.Image, x, y, max_radius=220, step=2):
 
     return x, y
 
-def _remove_border_connected(alpha: Image.Image, threshold=8) -> Image.Image:
-    alpha = alpha.copy().convert("L")
-    w, h = alpha.size
-    px = alpha.load()
-
-    visited = [[False] * h for _ in range(w)]
-    stack = []
-
-    for x in range(w):
-        if px[x, 0] > threshold:
-            stack.append((x, 0))
-        if px[x, h - 1] > threshold:
-            stack.append((x, h - 1))
-    for y in range(h):
-        if px[0, y] > threshold:
-            stack.append((0, y))
-        if px[w - 1, y] > threshold:
-            stack.append((w - 1, y))
-
-    while stack:
-        x, y = stack.pop()
-        if x < 0 or x >= w or y < 0 or y >= h:
-            continue
-        if visited[x][y]:
-            continue
-        visited[x][y] = True
-        if px[x, y] <= threshold:
-            continue
-
-        px[x, y] = 0
-        stack.append((x + 1, y))
-        stack.append((x - 1, y))
-        stack.append((x, y + 1))
-        stack.append((x, y - 1))
-
-    return alpha
-
 def prepare_tattoo_alpha(tattoo_img: Image.Image) -> Image.Image:
     """
-    Shape-preserving mask:
-    - remove bright background
-    - keep full dark subject structure
+    Robust alpha extraction that does NOT disappear easily.
     """
     gray = ImageOps.grayscale(tattoo_img)
-    gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray = ImageOps.autocontrast(gray, cutoff=0)
 
     inv = ImageOps.invert(gray)
-    alpha = inv.point(lambda p: 0 if p < 38 else min(255, int((p - 38) * 1.45)))
 
+    # Softer threshold to keep more tattoo content
+    alpha = inv.point(lambda p: 0 if p < 24 else min(255, int((p - 24) * 1.25)))
+
+    # Very light cleanup only
     alpha = alpha.filter(ImageFilter.MedianFilter(3))
-    alpha = _remove_border_connected(alpha, threshold=8)
 
     bbox = alpha.getbbox()
     if bbox:
@@ -262,9 +225,8 @@ def apply_tattoo_stable(
     skin_mask_full = build_skin_mask(bg_rgb)
     tattoo_alpha = prepare_tattoo_alpha(tattoo_img)
 
-    # Resize by slider
     t_w = max(1, int(bg_w * (scale / 100)))
-    ratio = t_w / float(tattoo_alpha.size[0])
+    ratio = t_w / float(max(1, tattoo_alpha.size[0]))
     t_h = max(1, int(tattoo_alpha.size[1] * ratio))
     tattoo_alpha = tattoo_alpha.resize((t_w, t_h), Image.Resampling.LANCZOS)
 
@@ -288,18 +250,19 @@ def apply_tattoo_stable(
         if coverage < 0.10:
             raise gr.Error("Not enough skin detected in selected area.")
 
-    # Keep tattoo only on skin
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin_hard)
 
-    # Keep fine details
-    final_alpha = final_alpha.point(lambda p: 0 if p < 12 else p)
+    # Fallback if skin mask wipes everything
+    if final_alpha.getbbox() is None:
+        final_alpha = tattoo_alpha.copy()
 
-    # Stronger visibility
-    alpha_gain = 0.50 + (realism_strength / 100.0) * 0.60
+    # Keep weak details
+    final_alpha = final_alpha.point(lambda p: 0 if p < 6 else p)
+
+    alpha_gain = 0.55 + (realism_strength / 100.0) * 0.55
     final_alpha = final_alpha.point(lambda p: int(max(0, min(255, p * alpha_gain))))
 
     roi_bg = bg_rgb.crop((actual_x, actual_y, actual_x + t_w, actual_y + t_h))
-
     dark = int(max(0, min(60, 60 - int(ink_darkness))))
     tattoo_tone = Image.new("RGB", (t_w, t_h), (dark, dark, dark))
 
@@ -376,7 +339,7 @@ with gr.Blocks(title="TattooDesigner Stable Mode") as demo:
         """
 # TattooDesigner Stable Mode
 
-This version prioritizes clean, complete tattoo shapes and avoids rectangle/line-loss artifacts.
+This version prioritizes reliable visibility and complete tattoo shapes.
 """
     )
 
@@ -410,8 +373,8 @@ This version prioritizes clean, complete tattoo shapes and avoids rectangle/line
 
             with gr.Group():
                 gr.Markdown("### Visibility Controls")
-                realism_strength = gr.Slider(0, 100, value=75, label="Realism strength")
-                ink_darkness = gr.Slider(0, 100, value=85, label="Ink darkness")
+                realism_strength = gr.Slider(0, 100, value=85, label="Realism strength")
+                ink_darkness = gr.Slider(0, 100, value=90, label="Ink darkness")
                 edge_blur = gr.Slider(0.0, 2.0, value=0.0, step=0.1, label="Edge blur")
                 strict_skin_mode = gr.Checkbox(value=STRICT_SKIN_DEFAULT, label="Strict skin mode")
 
