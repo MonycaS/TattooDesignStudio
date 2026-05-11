@@ -42,23 +42,21 @@ ASPECT_RATIOS = {
 BODY_AREAS = ["hand", "arm", "leg", "neck", "chest", "back"]
 TATTOO_TYPES = ["minimalist", "fine line", "traditional", "tribal", "geometric", "realism"]
 
-# Auto placement defaults
 DEFAULT_X = 50
 DEFAULT_Y = 50
 AUTO_PLACEMENT = {
     "hand": (52, 58),
     "arm": (50, 45),
-    "leg": (50, 48),
+    "leg": (50, 48),  # mai sus pe picior fata de 62
     "neck": (50, 38),
     "chest": (50, 42),
     "back": (50, 48),
 }
 
-# Strict mode: reject if skin in placement zone is too low
 STRICT_SKIN_MODE = True
-MIN_SKIN_COVERAGE = 0.12  # 12%
+MIN_SKIN_COVERAGE = 0.12
 
-# DOAR PENTRU TEST – înlocuiești cu cheile reale de la Gumroad
+# DOAR PENTRU TEST – inlocuiesti cu cheile reale de la Gumroad
 VALID_KEYS = {
     "ABC-123",
     "DEF-456",
@@ -113,7 +111,6 @@ def _build_skin_mask(rgb_img: Image.Image) -> Image.Image:
             r, g, b = src[x, y]
             dst[x, y] = 255 if _is_skin_pixel(r, g, b) else 0
 
-    # Soften edges for natural blending
     mask = mask.filter(ImageFilter.GaussianBlur(2))
     return mask
 
@@ -150,25 +147,19 @@ def _snap_to_skin(rgb_img: Image.Image, x: int, y: int, max_radius: int = 220, s
 
 def prepare_tattoo_ink(tattoo_img: Image.Image) -> Image.Image:
     """
-    Hard black line-art mask:
-    - elimină complet fundalul alb/gri deschis
-    - păstrează doar liniile închise la culoare
-    - fără blur => fără umbră
+    Convert generated artwork to dark tattoo linework:
+    - remove bright background
+    - preserve shape details (less aggressive thresholding)
     """
-    rgb = tattoo_img.convert("RGB")
-    gray = ImageOps.grayscale(rgb)
+    gray = ImageOps.grayscale(tattoo_img)
     gray = ImageOps.autocontrast(gray, cutoff=1)
+    gray = gray.filter(ImageFilter.MedianFilter(3))
 
-    # Alpha hard: doar pixelii suficient de inchisi raman.
-    # Prag mai mic = mai multe detalii; mai mare = linii mai curate.
-    THRESH = 110
-    alpha = gray.point(lambda p: 255 if p < THRESH else 0)
+    inv = ImageOps.invert(gray)
+    alpha = inv.point(lambda p: 0 if p < 55 else min(255, int((p - 55) * 1.6)))
+    alpha = alpha.filter(ImageFilter.GaussianBlur(0.6))
 
-    # Curatare puncte mici/zgomot
-    alpha = alpha.filter(ImageFilter.MinFilter(3))
-    alpha = alpha.filter(ImageFilter.MaxFilter(3))
-
-    ink = Image.new("RGBA", gray.size, (8, 8, 8, 0))
+    ink = Image.new("RGBA", gray.size, (12, 12, 12, 0))
     ink.putalpha(alpha)
 
     bbox = ink.getbbox()
@@ -223,14 +214,14 @@ def apply_tattoo_to_skin(background_path, tattoo_img, x_pos, y_pos, scale):
         if coverage < MIN_SKIN_COVERAGE:
             raise gr.Error(
                 "Nu detectez suficienta piele in zona selectata. "
-                "Mută sliderele sau încarcă o poză mai clară."
+                "Muta sliderele sau incarca o poza mai clara."
             )
 
     # Keep tattoo only where skin exists
     tattoo_alpha = tattoo_rgba.getchannel("A")
     final_alpha = ImageChops.multiply(tattoo_alpha, roi_skin)
 
-    # Realistic tattoo opacity
+    # Realistic opacity without harsh shadow blocks
     final_alpha = final_alpha.point(lambda p: int(p * 0.75))
 
     tattoo_final = Image.new("RGBA", (t_w, t_h), (12, 12, 12, 0))
@@ -292,17 +283,19 @@ def generate_tattoo(
     if not prompt or not prompt.strip():
         return None
 
-    # verificare simplă de PRO
+    # verificare simpla de PRO
     is_pro = bool(license_key and license_key.strip() in VALID_KEYS)
 
-    # pentru Free, forțăm un aspect mai mic
+    # pentru Free, fortam un aspect mai mic
     if not is_pro:
         aspect_label = "Square 1:1"
 
-    # Prompt mai strict pentru linework de tatuaj
+    # Prompt mai strict pentru forme recognoscibile (ex: flowers)
     enhanced_prompt = (
         f"{prompt.strip()}, {tattoo_type} tattoo, placement on {body_area}, "
-        f"clean stencil reference, black ink linework only, no shadows, no gray wash, no 3d render"
+        "clean tattoo stencil, subject must be clearly recognizable, "
+        "black ink linework, crisp contours, simple composition, centered, "
+        "no abstract marks, no splatter, no texture, no watercolor, no shading, no 3d render"
     )
 
     try:
@@ -317,7 +310,7 @@ def generate_tattoo(
             final_img = tattoo_design
 
         if not is_pro:
-            # Free: micșorăm și punem watermark
+            # Free: micsoram si punem watermark
             final_img = final_img.resize((512, 512))
             final_img = add_watermark(final_img)
 
@@ -365,7 +358,7 @@ with gr.Blocks(title="TattooDesigner") as demo:
         with gr.Column():
             user_prompt = gr.Textbox(
                 label="Describe the tattoo (in English)",
-                placeholder="e.g. a small fox with flowers, minimalistic, on the forearm",
+                placeholder="e.g. single rose flower, black fine line tattoo stencil, no shading",
                 lines=3,
             )
             body_photo = gr.Image(
